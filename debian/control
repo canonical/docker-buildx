@@ -1,0 +1,31 @@
+Source: docker-buildx
+Section: admin
+Priority: optional
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Build-Depends: debhelper-compat (= 12),
+               dh-golang,
+               golang-go
+Standards-Version: 4.6.2
+Homepage: https://github.com/docker/buildx
+Vcs-Git: https://github.com/canonical/docker-buildx.git
+Vcs-Browser: https://github.com/canonical/docker-buildx
+Rules-Requires-Root: no
+
+Package: docker-buildx
+Architecture: amd64 arm64 armhf i386 ppc64el riscv64 s390x
+Depends: docker.io,
+         ${misc:Depends},
+         ${shlibs:Depends}
+Built-Using: ${libc:Built-Using}, ${misc:Built-Using}
+Description: Docker CLI plugin for extended build capabilities with BuildKit
+ buildx is a Docker CLI plugin for extended build capabilities with BuildKit.
+ .
+ Key features:
+ .
+  * Familiar UI from docker build
+  * Full BuildKit capabilities with container driver
+  * Multiple builder instance support
+  * Multi-node builds for cross-platform images
+  * Compose build support
+  * High-level build constructs (bake)
+  * In-container driver support (both Docker and Kubernetes)
