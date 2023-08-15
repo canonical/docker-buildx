@@ -14,7 +14,7 @@ Copyright: The BuildKit Authors
 License: Apache-2.0
 
 Files: debian/*
-Copyright: 2023 Lucas Kanashiro <lucas.kanashiro@canonical.com>
+Copyright: 2023 Canonical Ltd.
 License: Apache-2.0
 
 Files: vendor/go.opentelemetry.io/*
