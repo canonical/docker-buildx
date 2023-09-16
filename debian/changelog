@@ -1,3 +1,9 @@
+docker-buildx (0.11.2-0ubuntu1~20.04.1) focal; urgency=medium
+
+  * Backport version from Mantic (LP: #1968035, #2036350).
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Sat, 16 Sep 2023 07:02:36 -0300
+
 docker-buildx (0.11.2-0ubuntu1) mantic; urgency=medium
 
   * Initial release.
