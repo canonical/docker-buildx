@@ -1,3 +1,9 @@
+docker-buildx (0.11.2-0ubuntu1~20.04.2) focal-security; urgency=medium
+
+  * No change rebuild due to golang-1.20, golang-1.21 updates
+
+ -- Nishit Majithia <nishit.majithia@canonical.com>  Thu, 18 Jan 2024 10:04:04 +0530
+
 docker-buildx (0.11.2-0ubuntu1~20.04.1) focal; urgency=medium
 
   * Backport version from Mantic (LP: #1968035, #2036350).
