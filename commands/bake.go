@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/containerd/console"
 	"github.com/containerd/containerd/platforms"
 	"github.com/docker/buildx/bake"
 	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/builder"
+	"github.com/docker/buildx/localstate"
 	"github.com/docker/buildx/util/buildflags"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/buildx/util/confutil"
@@ -19,7 +22,9 @@ import (
 	"github.com/docker/buildx/util/progress"
 	"github.com/docker/buildx/util/tracing"
 	"github.com/docker/cli/cli/command"
+	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/util/appcontext"
+	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
@@ -95,8 +100,6 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 	defer cancel()
 
 	var nodes []builder.Node
-	var files []bake.File
-	var inp *bake.Input
 	var progressConsoleDesc, progressTextDesc string
 
 	// instance only needed for reading remote bake files or building
@@ -111,7 +114,7 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 		if err = updateLastActivity(dockerCli, b.NodeGroup); err != nil {
 			return errors.Wrapf(err, "failed to update builder last activity time")
 		}
-		nodes, err = b.LoadNodes(ctx, false)
+		nodes, err = b.LoadNodes(ctx)
 		if err != nil {
 			return err
 		}
@@ -124,7 +127,8 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 		term = true
 	}
 
-	printer, err := progress.NewPrinter(ctx2, os.Stderr, os.Stderr, cFlags.progress,
+	progressMode := progressui.DisplayMode(cFlags.progress)
+	printer, err := progress.NewPrinter(ctx2, os.Stderr, progressMode,
 		progress.WithDesc(progressTextDesc, progressConsoleDesc),
 	)
 	if err != nil {
@@ -137,19 +141,19 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 			if err == nil {
 				err = err1
 			}
-			if err == nil && cFlags.progress != progress.PrinterModeQuiet {
+			if err == nil && progressMode != progressui.QuietMode {
 				desktop.PrintBuildDetails(os.Stderr, printer.BuildRefs(), term)
 			}
 		}
 	}()
 
-	if url != "" {
-		files, inp, err = bake.ReadRemoteFiles(ctx, nodes, url, in.files, printer)
-	} else {
-		files, err = bake.ReadLocalFiles(in.files, dockerCli.In())
-	}
+	files, inp, err := readBakeFiles(ctx, nodes, url, in.files, dockerCli.In(), printer)
 	if err != nil {
 		return err
+	}
+
+	if len(files) == 0 {
+		return errors.New("couldn't find a bake definition")
 	}
 
 	tgts, grps, err := bake.ReadTargets(ctx, files, targets, overrides, map[string]string{
@@ -181,14 +185,16 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 		return err
 	}
 
+	def := struct {
+		Group  map[string]*bake.Group  `json:"group,omitempty"`
+		Target map[string]*bake.Target `json:"target"`
+	}{
+		Group:  grps,
+		Target: tgts,
+	}
+
 	if in.printOnly {
-		dt, err := json.MarshalIndent(struct {
-			Group  map[string]*bake.Group  `json:"group,omitempty"`
-			Target map[string]*bake.Target `json:"target"`
-		}{
-			grps,
-			tgts,
-		}, "", "  ")
+		dt, err := json.MarshalIndent(def, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -199,6 +205,28 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 		}
 		fmt.Fprintln(dockerCli.Out(), string(dt))
 		return nil
+	}
+
+	// local state group
+	groupRef := identity.NewID()
+	var refs []string
+	for k, b := range bo {
+		b.Ref = identity.NewID()
+		b.GroupRef = groupRef
+		refs = append(refs, b.Ref)
+		bo[k] = b
+	}
+	dt, err := json.Marshal(def)
+	if err != nil {
+		return err
+	}
+	if err := saveLocalStateGroup(dockerCli, groupRef, localstate.StateGroup{
+		Definition: dt,
+		Targets:    targets,
+		Inputs:     overrides,
+		Refs:       refs,
+	}); err != nil {
+		return err
 	}
 
 	resp, err := build.Build(ctx, nodes, bo, dockerutil.NewClient(dockerCli), confutil.ConfigDir(dockerCli), printer)
@@ -256,4 +284,51 @@ func bakeCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	commonBuildFlags(&cFlags, flags)
 
 	return cmd
+}
+
+func saveLocalStateGroup(dockerCli command.Cli, ref string, lsg localstate.StateGroup) error {
+	l, err := localstate.New(confutil.ConfigDir(dockerCli))
+	if err != nil {
+		return err
+	}
+	return l.SaveGroup(ref, lsg)
+}
+
+func readBakeFiles(ctx context.Context, nodes []builder.Node, url string, names []string, stdin io.Reader, pw progress.Writer) (files []bake.File, inp *bake.Input, err error) {
+	var lnames []string
+	var rnames []string
+	for _, v := range names {
+		if strings.HasPrefix(v, "cwd://") {
+			lnames = append(lnames, strings.TrimPrefix(v, "cwd://"))
+		} else {
+			rnames = append(rnames, v)
+		}
+	}
+
+	if url != "" {
+		var rfiles []bake.File
+		rfiles, inp, err = bake.ReadRemoteFiles(ctx, nodes, url, rnames, pw)
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, rfiles...)
+	}
+
+	if len(lnames) > 0 || url == "" {
+		var lfiles []bake.File
+		progress.Wrap("[internal] load local bake definitions", pw.Write, func(sub progress.SubLogger) error {
+			if url != "" {
+				lfiles, err = bake.ReadLocalFiles(lnames, stdin, sub)
+			} else {
+				lfiles, err = bake.ReadLocalFiles(append(lnames, rnames...), stdin, sub)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, lfiles...)
+	}
+
+	return
 }

@@ -7,13 +7,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/distribution/reference"
 	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/buildx/util/imagetools"
 	"github.com/docker/buildx/util/progress"
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/distribution/reference"
 	"github.com/moby/buildkit/util/appcontext"
+	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -25,6 +26,7 @@ type createOptions struct {
 	builder      string
 	files        []string
 	tags         []string
+	annotations  []string
 	dryrun       bool
 	actionAppend bool
 	progress     string
@@ -154,7 +156,7 @@ func runCreate(dockerCli command.Cli, in createOptions, args []string) error {
 		}
 	}
 
-	dt, desc, err := r.Combine(ctx, srcs)
+	dt, desc, err := r.Combine(ctx, srcs, in.annotations)
 	if err != nil {
 		return err
 	}
@@ -169,7 +171,7 @@ func runCreate(dockerCli command.Cli, in createOptions, args []string) error {
 
 	ctx2, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	printer, err := progress.NewPrinter(ctx2, os.Stderr, os.Stderr, in.progress)
+	printer, err := progress.NewPrinter(ctx2, os.Stderr, progressui.DisplayMode(in.progress))
 	if err != nil {
 		return err
 	}
@@ -283,6 +285,7 @@ func createCmd(dockerCli command.Cli, opts RootOptions) *cobra.Command {
 	flags.BoolVar(&options.dryrun, "dry-run", false, "Show final image instead of pushing")
 	flags.BoolVar(&options.actionAppend, "append", false, "Append to existing manifest")
 	flags.StringVar(&options.progress, "progress", "auto", `Set type of progress output ("auto", "plain", "tty"). Use plain to show container output`)
+	flags.StringArrayVarP(&options.annotations, "annotation", "", []string{}, "Add annotation to the image")
 
 	return cmd
 }

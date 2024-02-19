@@ -19,11 +19,13 @@ your environment.
 $ export BUILDX_EXPERIMENTAL=1
 ```
 
-To start a debug session for a build, you can use the `--invoke` flag with the
-build command to specify a command to launch in the resulting image.
+To start a debug session for a build, you can use the `buildx debug` command with `--invoke` flag to specify a command to launch in the resulting image.
+`buildx debug` command provides `buildx debug build` subcommand that provides the same features as the normal `buildx build` command but allows launching the debugger session after the build.
+
+Arguments available after `buildx debug build` are the same as the normal `buildx build`.
 
 ```console
-$ docker buildx build --invoke /bin/sh .
+$ docker buildx debug --invoke /bin/sh build .
 [+] Building 4.2s (19/19) FINISHED
  => [internal] connecting to local controller                                                                                   0.0s
  => [internal] load build definition from Dockerfile                                                                            0.0s
@@ -56,16 +58,16 @@ Supported keys are `args` (can be JSON array format), `entrypoint` (can be JSON 
 Example:
 
 ```
-$ docker buildx build --invoke 'entrypoint=["sh"],"args=[""-c"", ""env | grep -e FOO -e AAA""]","env=[""FOO=bar"", ""AAA=bbb""]"' .
+$ docker buildx debug --invoke 'entrypoint=["sh"],"args=[""-c"", ""env | grep -e FOO -e AAA""]","env=[""FOO=bar"", ""AAA=bbb""]"' build .
 ```
 
-#### `on-error`
+#### `on` flag
 
 If you want to start a debug session when a build fails, you can use
-`--invoke=on-error` to start a debug session when the build fails.
+`--on=error` to start a debug session when the build fails.
 
 ```console
-$ docker buildx build --invoke on-error .
+$ docker buildx debug --on=error build .
 [+] Building 4.2s (19/19) FINISHED
  => [internal] connecting to local controller                                                                                   0.0s
  => [internal] load build definition from Dockerfile                                                                            0.0s
@@ -85,13 +87,13 @@ Interactive container was restarted with process "edmzor60nrag7rh1mbi4o9lm8". Pr
 
 This allows you to explore the state of the image when the build failed.
 
-#### `debug-shell`
+#### Launch the debug session directly with `buildx debug` subcommand
 
 If you want to drop into a debug session without first starting the build, you
-can use `--invoke=debug-shell` to start a debug session.
+can use `buildx debug` command to start a debug session.
 
 ```
-$ docker buildx build --invoke debug-shell .
+$ docker buildx debug
 [+] Building 4.2s (19/19) FINISHED
  => [internal] connecting to local controller                                                                                   0.0s
 (buildx)
@@ -116,12 +118,12 @@ Available commands are:
   disconnect	disconnect a client from a buildx server. Specific session ID can be specified an arg
   exec		execute a process in the interactive container
   exit		exits monitor
-  help		shows this message
+  help		shows this message. Optionally pass a command name as an argument to print the detailed usage.
   kill		kill buildx server
   list		list buildx sessions
   ps		list processes invoked by "exec". Use "attach" to attach IO to that process
   reload	reloads the context and build it
-  rollback	re-runs the interactive container with initial rootfs contents
+  rollback	re-runs the interactive container with the step's rootfs contents
 ```
 
 ## Build controllers
@@ -135,15 +137,15 @@ To detach the build process from the CLI, you can use the `--detach=true` flag w
 the build command.
 
 ```console
-$ docker buildx build --detach=true --invoke /bin/sh .
+$ docker buildx debug --invoke /bin/sh build --detach=true .
 ```
 
 If you start a debugging session using the `--invoke` flag with a detached
-build, then you can attach to it using the `buildx debug-shell` subcommand to
+build, then you can attach to it using the `buildx debug` command to
 immediately enter the monitor mode.
 
 ```console
-$ docker buildx debug-shell
+$ docker buildx debug
 [+] Building 0.0s (1/1) FINISHED                                                                                                                                                                                
  => [internal] connecting to remote controller
 (buildx) list
