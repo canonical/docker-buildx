@@ -204,15 +204,6 @@ Files: vendor/github.com/klauspost/compress/zstd/internal/xxhash/*
 Copyright: 2016 Caleb Spare
 License: Expat
 
-Files: vendor/github.com/agl/ed25519/*
-Copyright: 2012-2013 The Go Authors
-License: BSD-3-clause-Google
-
-Files: vendor/github.com/cyphar/filepath-securejoin/*
-Copyright: 2017 SUSE LLC
-           2014-2015 Docker Inc & Go Authors
-License: BSD-3-clause-Google
-
 Files: vendor/github.com/moby/*
 Copyright: 2012-2021 Docker Inc
 License: Apache-2.0
@@ -501,10 +492,6 @@ License: Apache-2.0
 Files: vendor/github.com/Azure/go-ansiterm/*
 Copyright: 2015 Microsoft Corporation
 License: Expat
-
-Files: vendor/github.com/distribution/distribution/v3/*
-Copyright: The containerd Authors
-License: Apache-2.0
 
 Files: vendor/github.com/grpc-ecosystem/go-grpc-middleware/*
 Copyright: 2016 Michal Witkowski
