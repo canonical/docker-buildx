@@ -1,4 +1,4 @@
-docker-buildx (0.12.1-0ubuntu1) UNRELEASED; urgency=medium
+docker-buildx (0.12.1-0ubuntu1) noble; urgency=medium
 
   * New upstream release.
   * d/copyright: remove superfluous file pattern
