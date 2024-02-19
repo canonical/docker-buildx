@@ -22,7 +22,7 @@ services:
     build:
       context: ./dir
       additional_contexts:
-        foo: /bar
+        foo: ./bar
       dockerfile: Dockerfile-alternate
       network:
         none
@@ -49,6 +49,9 @@ secrets:
     file: /root/.aws/credentials
 `)
 
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
 	c, err := ParseCompose([]compose.ConfigFile{{Content: dt}}, nil)
 	require.NoError(t, err)
 
@@ -62,12 +65,12 @@ secrets:
 		return c.Targets[i].Name < c.Targets[j].Name
 	})
 	require.Equal(t, "db", c.Targets[0].Name)
-	require.Equal(t, "./db", *c.Targets[0].Context)
+	require.Equal(t, filepath.Join(cwd, "db"), *c.Targets[0].Context)
 	require.Equal(t, []string{"docker.io/tonistiigi/db"}, c.Targets[0].Tags)
 
 	require.Equal(t, "webapp", c.Targets[1].Name)
-	require.Equal(t, "./dir", *c.Targets[1].Context)
-	require.Equal(t, map[string]string{"foo": "/bar"}, c.Targets[1].Contexts)
+	require.Equal(t, filepath.Join(cwd, "dir"), *c.Targets[1].Context)
+	require.Equal(t, map[string]string{"foo": filepath.Join(cwd, "bar")}, c.Targets[1].Contexts)
 	require.Equal(t, "Dockerfile-alternate", *c.Targets[1].Dockerfile)
 	require.Equal(t, 1, len(c.Targets[1].Args))
 	require.Equal(t, ptrstr("123"), c.Targets[1].Args["buildno"])
@@ -80,7 +83,7 @@ secrets:
 	}, c.Targets[1].Secrets)
 
 	require.Equal(t, "webapp2", c.Targets[2].Name)
-	require.Equal(t, "./dir", *c.Targets[2].Context)
+	require.Equal(t, filepath.Join(cwd, "dir"), *c.Targets[2].Context)
 	require.Equal(t, "FROM alpine\n", *c.Targets[2].DockerfileInline)
 }
 
@@ -654,6 +657,85 @@ services:
 	c, err := ParseCompose([]compose.ConfigFile{{Content: dt}}, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]*string{"bar": ptrstr("baz")}, c.Targets[0].Args)
+}
+
+func TestDependsOn(t *testing.T) {
+	var dt = []byte(`
+services:
+  foo:
+    build:
+     context: .
+    ports:
+      - 3306:3306
+    depends_on:
+      - bar
+  bar:
+    build:
+     context: .
+`)
+	_, err := ParseCompose([]compose.ConfigFile{{Content: dt}}, nil)
+	require.NoError(t, err)
+}
+
+func TestInclude(t *testing.T) {
+	tmpdir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(tmpdir, "compose-foo.yml"), []byte(`
+services:
+  foo:
+    build:
+     context: .
+     target: buildfoo
+    ports:
+      - 3306:3306
+`), 0644)
+	require.NoError(t, err)
+
+	var dt = []byte(`
+include:
+  - compose-foo.yml
+
+services:
+  bar:
+    build:
+     context: .
+     target: buildbar
+`)
+
+	chdir(t, tmpdir)
+	c, err := ParseComposeFiles([]File{{
+		Name: "compose.yml",
+		Data: dt,
+	}})
+	require.NoError(t, err)
+
+	require.Equal(t, 2, len(c.Targets))
+	sort.Slice(c.Targets, func(i, j int) bool {
+		return c.Targets[i].Name < c.Targets[j].Name
+	})
+	require.Equal(t, "bar", c.Targets[0].Name)
+	require.Equal(t, "buildbar", *c.Targets[0].Target)
+	require.Equal(t, "foo", c.Targets[1].Name)
+	require.Equal(t, "buildfoo", *c.Targets[1].Target)
+}
+
+func TestDevelop(t *testing.T) {
+	var dt = []byte(`
+services:
+  scratch:
+    build:
+     context: ./webapp
+    develop:
+      watch: 
+        - path: ./webapp/html
+          action: sync
+          target: /var/www
+          ignore:
+            - node_modules/
+`)
+
+	_, err := ParseCompose([]compose.ConfigFile{{Content: dt}}, nil)
+	require.NoError(t, err)
 }
 
 // chdir changes the current working directory to the named directory,

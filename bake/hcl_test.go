@@ -634,6 +634,29 @@ func TestHCLMultiFileAttrs(t *testing.T) {
 	require.Equal(t, ptrstr("pre-ghi"), c.Targets[0].Args["v1"])
 }
 
+func TestHCLMultiFileGlobalAttrs(t *testing.T) {
+	dt := []byte(`
+		FOO = "abc"
+		target "app" {
+			args = {
+				v1 = "pre-${FOO}"
+			}
+		}
+		`)
+	dt2 := []byte(`
+		FOO = "def"
+		`)
+
+	c, err := ParseFiles([]File{
+		{Data: dt, Name: "c1.hcl"},
+		{Data: dt2, Name: "c2.hcl"},
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(c.Targets))
+	require.Equal(t, c.Targets[0].Name, "app")
+	require.Equal(t, "pre-def", *c.Targets[0].Args["v1"])
+}
+
 func TestHCLDuplicateTarget(t *testing.T) {
 	dt := []byte(`
 		target "app" {
@@ -1088,6 +1111,27 @@ func TestHCLMatrixBadTypes(t *testing.T) {
 		`)
 	_, err = ParseFile(dt, "docker-bake.hcl")
 	require.Error(t, err)
+}
+
+func TestHCLMatrixWithGlobalTarget(t *testing.T) {
+	dt := []byte(`
+		target "x" {
+			tags = ["a", "b"]
+		}
+		
+		target "default" {
+			tags = target.x.tags
+			matrix = {
+				dummy = [""]
+			}
+		}
+	`)
+	c, err := ParseFile(dt, "docker-bake.hcl")
+	require.NoError(t, err)
+	require.Equal(t, 2, len(c.Targets))
+	require.Equal(t, "x", c.Targets[0].Name)
+	require.Equal(t, "default", c.Targets[1].Name)
+	require.Equal(t, []string{"a", "b"}, c.Targets[1].Tags)
 }
 
 func TestJSONAttributes(t *testing.T) {

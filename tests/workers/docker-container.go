@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/moby/buildkit/identity"
@@ -19,6 +20,8 @@ func InitDockerContainerWorker() {
 
 type containerWorker struct {
 	id string
+
+	unsupported []string
 
 	docker      integration.Backend
 	dockerClose func() error
@@ -42,11 +45,16 @@ func (w *containerWorker) New(ctx context.Context, cfg *integration.BackendConfi
 		return w.docker, w.dockerClose, w.dockerErr
 	}
 
+	cfgfile, err := integration.WriteConfig(cfg.DaemonConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.RemoveAll(filepath.Dir(cfgfile))
 	name := "integration-container-" + identity.NewID()
 	cmd := exec.Command("buildx", "create",
 		"--bootstrap",
 		"--name="+name,
-		"--config="+cfg.ConfigFile,
+		"--config="+cfgfile,
 		"--driver=docker-container",
 		"--driver-opt=network=host",
 	)
@@ -65,14 +73,15 @@ func (w *containerWorker) New(ctx context.Context, cfg *integration.BackendConfi
 	}
 
 	return &backend{
-		context: w.docker.DockerAddress(),
-		builder: name,
+		context:             w.docker.DockerAddress(),
+		builder:             name,
+		unsupportedFeatures: w.unsupported,
 	}, cl, nil
 }
 
 func (w *containerWorker) Close() error {
-	if close := w.dockerClose; close != nil {
-		return close()
+	if c := w.dockerClose; c != nil {
+		return c()
 	}
 
 	// reset the worker to be ready to go again
