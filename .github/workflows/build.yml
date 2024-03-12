@@ -31,20 +31,20 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           buildkitd-flags: --debug
       -
         name: Build
-        uses: docker/bake-action@v3
+        uses: docker/bake-action@v4
         with:
           targets: integration-test-base
           set: |
@@ -66,6 +66,7 @@ jobs:
       matrix:
         worker:
           - docker
+          - docker\+containerd  # same as docker, but with containerd snapshotter
           - docker-container
           - remote
         pkg:
@@ -76,20 +77,22 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           buildkitd-flags: --debug
       -
         name: Build test image
-        uses: docker/bake-action@v3
+        uses: docker/bake-action@v4
         with:
           targets: integration-test
           set: |
@@ -101,8 +104,8 @@ jobs:
           export TEST_REPORT_SUFFIX=-${{ github.job }}-$(echo "${{ matrix.pkg }}-${{ matrix.skip-integration-tests }}-${{ matrix.worker }}" | tr -dc '[:alnum:]-\n\r' | tr '[:upper:]' '[:lower:]')
           ./hack/test
         env:
-          TEST_DOCKERD: "${{ (matrix.worker == 'docker' || matrix.worker == 'docker-container') && '1' || '0' }}"
-          TESTFLAGS: "${{ (matrix.worker == 'docker') && env.TESTFLAGS_DOCKER || env.TESTFLAGS }} --run=//worker=${{ matrix.worker }}$"
+          TEST_DOCKERD: "${{ startsWith(matrix.worker, 'docker') && '1' || '0' }}"
+          TESTFLAGS: "${{ (matrix.worker == 'docker' || matrix.worker == 'docker\\+containerd') && env.TESTFLAGS_DOCKER || env.TESTFLAGS }} --run=//worker=${{ matrix.worker }}$"
           TESTPKGS: "${{ matrix.pkg }}"
           SKIP_INTEGRATION_TESTS: "${{ matrix.skip-integration-tests }}"
       -
@@ -132,7 +135,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Create matrix
         id: platforms
@@ -159,13 +162,13 @@ jobs:
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -194,13 +197,13 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -208,7 +211,7 @@ jobs:
       -
         name: Docker meta
         id: meta
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REPO_SLUG }}
@@ -220,13 +223,13 @@ jobs:
       -
         name: Login to DockerHub
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       -
         name: Build and push image
-        uses: docker/bake-action@v3
+        uses: docker/bake-action@v4
         with:
           files: |
             ./docker-bake.hcl
@@ -246,7 +249,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Download binaries
         uses: actions/download-artifact@v3
@@ -280,13 +283,13 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=moby/buildkit:master
@@ -294,6 +297,6 @@ jobs:
       -
         # Just run a bake target to check eveything runs fine
         name: Build
-        uses: docker/bake-action@v3
+        uses: docker/bake-action@v4
         with:
           targets: binaries
