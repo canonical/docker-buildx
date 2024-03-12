@@ -98,7 +98,11 @@ func (p *parser) locateKeyName(src string) (string, string, bool, error) {
 	var key string
 	var inherited bool
 	// trim "export" and space at beginning
-	src = strings.TrimLeftFunc(exportRegex.ReplaceAllString(src, ""), isSpace)
+	if exportRegex.MatchString(src) {
+		// we use a `strings.trim` to preserve the pointer to the same underlying memory.
+		// a regexp replace would copy the string.
+		src = strings.TrimLeftFunc(strings.TrimPrefix(src, "export"), isSpace)
+	}
 
 	// locate key name end and validate it in single loop
 	offset := 0
@@ -123,8 +127,8 @@ loop:
 			}
 
 			return "", "", inherited, fmt.Errorf(
-				`line %d: unexpected character %q in variable name`,
-				p.line, string(rune))
+				`line %d: unexpected character %q in variable name %q`,
+				p.line, string(rune), strings.Split(src, "\n")[0])
 		}
 	}
 
@@ -153,17 +157,24 @@ func (p *parser) extractVarValue(src string, envMap map[string]string, lookupFn 
 		return retVal, rest, err
 	}
 
+	previousCharIsEscape := false
 	// lookup quoted string terminator
 	for i := 1; i < len(src); i++ {
 		if src[i] == '\n' {
 			p.line++
 		}
 		if char := src[i]; char != quote {
+			if !previousCharIsEscape && char == '\\' {
+				previousCharIsEscape = true
+			} else {
+				previousCharIsEscape = false
+			}
 			continue
 		}
 
 		// skip escaped quote symbol (\" or \', depends on quote)
-		if prevChar := src[i-1]; prevChar == '\\' {
+		if previousCharIsEscape {
+			previousCharIsEscape = false
 			continue
 		}
 

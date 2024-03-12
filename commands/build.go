@@ -17,6 +17,7 @@ import (
 	"github.com/containerd/console"
 	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/builder"
+	"github.com/docker/buildx/commands/debug"
 	"github.com/docker/buildx/controller"
 	cbuild "github.com/docker/buildx/controller/build"
 	"github.com/docker/buildx/controller/control"
@@ -44,6 +45,7 @@ import (
 	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/moby/buildkit/util/appcontext"
 	"github.com/moby/buildkit/util/grpcerrors"
+	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/morikuni/aec"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -54,6 +56,7 @@ import (
 
 type buildOptions struct {
 	allow          []string
+	annotations    []string
 	buildArgs      []string
 	cacheFrom      []string
 	cacheTo        []string
@@ -76,9 +79,6 @@ type buildOptions struct {
 	target         string
 	ulimits        *dockeropts.UlimitOpt
 
-	invoke  *invokeConfig
-	noBuild bool
-
 	attests    []string
 	sbom       string
 	provenance string
@@ -94,18 +94,32 @@ type buildOptions struct {
 	exportLoad   bool
 
 	control.ControlOptions
+
+	invokeConfig *invokeConfig
 }
 
 func (o *buildOptions) toControllerOptions() (*controllerapi.BuildOptions, error) {
 	var err error
+
+	buildArgs, err := listToMap(o.buildArgs, true)
+	if err != nil {
+		return nil, err
+	}
+
+	labels, err := listToMap(o.labels, false)
+	if err != nil {
+		return nil, err
+	}
+
 	opts := controllerapi.BuildOptions{
 		Allow:          o.allow,
-		BuildArgs:      listToMap(o.buildArgs, true),
+		Annotations:    o.annotations,
+		BuildArgs:      buildArgs,
 		CgroupParent:   o.cgroupParent,
 		ContextPath:    o.contextPath,
 		DockerfileName: o.dockerfileName,
 		ExtraHosts:     o.extraHosts,
-		Labels:         listToMap(o.labels, false),
+		Labels:         labels,
 		NetworkMode:    o.networkMode,
 		NoCacheFilter:  o.noCacheFilter,
 		Platforms:      o.platforms,
@@ -185,20 +199,15 @@ func (o *buildOptions) toControllerOptions() (*controllerapi.BuildOptions, error
 	return &opts, nil
 }
 
-func (o *buildOptions) toProgress() (string, error) {
-	switch o.progress {
-	case progress.PrinterModeAuto, progress.PrinterModeTty, progress.PrinterModePlain, progress.PrinterModeQuiet:
-	default:
-		return "", errors.Errorf("progress=%s is not a valid progress option", o.progress)
-	}
-
+func (o *buildOptions) toDisplayMode() (progressui.DisplayMode, error) {
+	progress := progressui.DisplayMode(o.progress)
 	if o.quiet {
-		if o.progress != progress.PrinterModeAuto && o.progress != progress.PrinterModeQuiet {
+		if progress != progressui.AutoMode && progress != progressui.QuietMode {
 			return "", errors.Errorf("progress=%s and quiet cannot be used together", o.progress)
 		}
-		return progress.PrinterModeQuiet, nil
+		return progressui.QuietMode, nil
 	}
-	return o.progress, nil
+	return progress, nil
 }
 
 func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
@@ -234,7 +243,7 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	_, err = b.LoadNodes(ctx, false)
+	_, err = b.LoadNodes(ctx)
 	if err != nil {
 		return err
 	}
@@ -246,12 +255,12 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 
 	ctx2, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	progressMode, err := options.toProgress()
+	progressMode, err := options.toDisplayMode()
 	if err != nil {
 		return err
 	}
 	var printer *progress.Printer
-	printer, err = progress.NewPrinter(ctx2, os.Stderr, os.Stderr, progressMode,
+	printer, err = progress.NewPrinter(ctx2, os.Stderr, progressMode,
 		progress.WithDesc(
 			fmt.Sprintf("building with %q instance using %s driver", b.Name, b.Driver),
 			fmt.Sprintf("%s:%s", b.Driver, b.Name),
@@ -279,7 +288,7 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 		return retErr
 	}
 
-	if progressMode != progress.PrinterModeQuiet {
+	if progressMode != progressui.QuietMode {
 		desktop.PrintBuildDetails(os.Stderr, printer.BuildRefs(), term)
 	} else {
 		fmt.Println(getImageID(resp.ExporterResponse))
@@ -320,11 +329,10 @@ func runBasicBuild(ctx context.Context, dockerCli command.Cli, opts *controllera
 }
 
 func runControllerBuild(ctx context.Context, dockerCli command.Cli, opts *controllerapi.BuildOptions, options buildOptions, printer *progress.Printer) (*client.SolveResponse, error) {
-	if options.invoke != nil && (options.dockerfileName == "-" || options.contextPath == "-") {
+	if options.invokeConfig != nil && (options.dockerfileName == "-" || options.contextPath == "-") {
 		// stdin must be usable for monitor
 		return nil, errors.Errorf("Dockerfile or context from stdin is not supported with invoke")
 	}
-
 	c, err := controller.NewController(ctx, options.ControlOptions, dockerCli, printer)
 	if err != nil {
 		return nil, err
@@ -347,55 +355,53 @@ func runControllerBuild(ctx context.Context, dockerCli command.Cli, opts *contro
 	var resp *client.SolveResponse
 	f := ioset.NewSingleForwarder()
 	f.SetReader(dockerCli.In())
-	if !options.noBuild {
-		pr, pw := io.Pipe()
-		f.SetWriter(pw, func() io.WriteCloser {
-			pw.Close() // propagate EOF
-			logrus.Debug("propagating stdin close")
-			return nil
-		})
+	pr, pw := io.Pipe()
+	f.SetWriter(pw, func() io.WriteCloser {
+		pw.Close() // propagate EOF
+		logrus.Debug("propagating stdin close")
+		return nil
+	})
 
-		ref, resp, err = c.Build(ctx, *opts, pr, printer)
-		if err != nil {
-			var be *controllererrors.BuildError
-			if errors.As(err, &be) {
-				ref = be.Ref
-				retErr = err
-				// We can proceed to monitor
-			} else {
-				return nil, errors.Wrapf(err, "failed to build")
-			}
-		}
-
-		if err := pw.Close(); err != nil {
-			logrus.Debug("failed to close stdin pipe writer")
-		}
-		if err := pr.Close(); err != nil {
-			logrus.Debug("failed to close stdin pipe reader")
+	ref, resp, err = c.Build(ctx, *opts, pr, printer)
+	if err != nil {
+		var be *controllererrors.BuildError
+		if errors.As(err, &be) {
+			ref = be.Ref
+			retErr = err
+			// We can proceed to monitor
+		} else {
+			return nil, errors.Wrapf(err, "failed to build")
 		}
 	}
 
-	// post-build operations
-	if options.invoke != nil && options.invoke.needsMonitor(retErr) {
+	if err := pw.Close(); err != nil {
+		logrus.Debug("failed to close stdin pipe writer")
+	}
+	if err := pr.Close(); err != nil {
+		logrus.Debug("failed to close stdin pipe reader")
+	}
+
+	if options.invokeConfig != nil && options.invokeConfig.needsDebug(retErr) {
+		// Print errors before launching monitor
+		if err := printError(retErr, printer); err != nil {
+			logrus.Warnf("failed to print error information: %v", err)
+		}
+
 		pr2, pw2 := io.Pipe()
 		f.SetWriter(pw2, func() io.WriteCloser {
 			pw2.Close() // propagate EOF
 			return nil
 		})
-		con := console.Current()
-		if err := con.SetRaw(); err != nil {
-			if err := c.Disconnect(ctx, ref); err != nil {
-				logrus.Warnf("disconnect error: %v", err)
-			}
-			return nil, errors.Errorf("failed to configure terminal: %v", err)
-		}
-		err = monitor.RunMonitor(ctx, ref, opts, options.invoke.InvokeConfig, c, pr2, os.Stdout, os.Stderr, printer)
-		con.Reset()
+		monitorBuildResult, err := options.invokeConfig.runDebug(ctx, ref, opts, c, pr2, os.Stdout, os.Stderr, printer)
 		if err := pw2.Close(); err != nil {
 			logrus.Debug("failed to close monitor stdin pipe reader")
 		}
 		if err != nil {
 			logrus.Warnf("failed to run monitor: %v", err)
+		}
+		if monitorBuildResult != nil {
+			// Update return values with the last build result from monitor
+			resp, retErr = monitorBuildResult.Resp, monitorBuildResult.Err
 		}
 	} else {
 		if err := c.Disconnect(ctx, ref); err != nil {
@@ -406,10 +412,37 @@ func runControllerBuild(ctx context.Context, dockerCli command.Cli, opts *contro
 	return resp, retErr
 }
 
-func buildCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
-	options := buildOptions{}
+func printError(err error, printer *progress.Printer) error {
+	if err == nil {
+		return nil
+	}
+	if err := printer.Pause(); err != nil {
+		return err
+	}
+	defer printer.Unpause()
+	for _, s := range errdefs.Sources(err) {
+		s.Print(os.Stderr)
+	}
+	fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+	return nil
+}
+
+func newDebuggableBuild(dockerCli command.Cli, rootOpts *rootOptions) debug.DebuggableCmd {
+	return &debuggableBuild{dockerCli: dockerCli, rootOpts: rootOpts}
+}
+
+type debuggableBuild struct {
+	dockerCli command.Cli
+	rootOpts  *rootOptions
+}
+
+func (b *debuggableBuild) NewDebugger(cfg *debug.DebugConfig) *cobra.Command {
+	return buildCmd(b.dockerCli, b.rootOpts, cfg)
+}
+
+func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.DebugConfig) *cobra.Command {
 	cFlags := &commonFlags{}
-	var invokeFlag string
+	options := &buildOptions{}
 
 	cmd := &cobra.Command{
 		Use:     "build [OPTIONS] PATH | URL | -",
@@ -431,15 +464,15 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 			options.progress = cFlags.progress
 			cmd.Flags().VisitAll(checkWarnedFlags)
 
-			if invokeFlag != "" {
-				invoke, err := parseInvokeConfig(invokeFlag)
-				if err != nil {
+			if debugConfig != nil && (debugConfig.InvokeFlag != "" || debugConfig.OnFlag != "") {
+				iConfig := new(invokeConfig)
+				if err := iConfig.parseInvokeConfig(debugConfig.InvokeFlag, debugConfig.OnFlag); err != nil {
 					return err
 				}
-				options.invoke = &invoke
-				options.noBuild = invokeFlag == "debug-shell"
+				options.invokeConfig = iConfig
 			}
-			return runBuild(dockerCli, options)
+
+			return runBuild(dockerCli, *options)
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			return nil, cobra.ShellCompDirectiveFilterDirs
@@ -458,13 +491,15 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 
 	flags.StringSliceVar(&options.allow, "allow", []string{}, `Allow extra privileged entitlement (e.g., "network.host", "security.insecure")`)
 
+	flags.StringArrayVarP(&options.annotations, "annotation", "", []string{}, "Add annotation to the image")
+
 	flags.StringArrayVar(&options.buildArgs, "build-arg", []string{}, "Set build-time variables")
 
 	flags.StringArrayVar(&options.cacheFrom, "cache-from", []string{}, `External cache sources (e.g., "user/app:cache", "type=local,src=path/to/dir")`)
 
 	flags.StringArrayVar(&options.cacheTo, "cache-to", []string{}, `Cache export destinations (e.g., "user/app:cache", "type=local,dest=path/to/dir")`)
 
-	flags.StringVar(&options.cgroupParent, "cgroup-parent", "", "Optional parent cgroup for the container")
+	flags.StringVar(&options.cgroupParent, "cgroup-parent", "", `Set the parent cgroup for the "RUN" instructions during build`)
 	flags.SetAnnotation("cgroup-parent", annotation.ExternalURL, []string{"https://docs.docker.com/engine/reference/commandline/build/#cgroup-parent"})
 
 	flags.StringArrayVar(&options.contexts, "build-context", []string{}, "Additional build contexts (e.g., name=path)")
@@ -515,8 +550,7 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	flags.StringVar(&options.provenance, "provenance", "", `Shorthand for "--attest=type=provenance"`)
 
 	if isExperimental() {
-		flags.StringVar(&invokeFlag, "invoke", "", "Invoke a command after the build")
-		flags.SetAnnotation("invoke", "experimentalCLI", nil)
+		// TODO: move this to debug command if needed
 		flags.StringVar(&options.Root, "root", "", "Specify root directory of server to connect")
 		flags.SetAnnotation("root", "experimentalCLI", nil)
 		flags.BoolVar(&options.Detach, "detach", false, "Detach buildx server (supported only on linux)")
@@ -679,109 +713,24 @@ func updateLastActivity(dockerCli command.Cli, ng *store.NodeGroup) error {
 	return txn.UpdateLastActivity(ng)
 }
 
-type invokeConfig struct {
-	controllerapi.InvokeConfig
-	invokeFlag string
-}
-
-func (cfg *invokeConfig) needsMonitor(retErr error) bool {
-	switch cfg.invokeFlag {
-	case "debug-shell":
-		return true
-	case "on-error":
-		return retErr != nil
-	default:
-		return cfg.invokeFlag != ""
-	}
-}
-
-func parseInvokeConfig(invoke string) (cfg invokeConfig, err error) {
-	cfg.invokeFlag = invoke
-	cfg.Tty = true
-	switch invoke {
-	case "default", "debug-shell":
-		return cfg, nil
-	case "on-error":
-		// NOTE: we overwrite the command to run because the original one should fail on the failed step.
-		// TODO: make this configurable via flags or restorable from LLB.
-		// Discussion: https://github.com/docker/buildx/pull/1640#discussion_r1113295900
-		cfg.Cmd = []string{"/bin/sh"}
-		return cfg, nil
-	}
-
-	csvReader := csv.NewReader(strings.NewReader(invoke))
-	csvReader.LazyQuotes = true
-	fields, err := csvReader.Read()
-	if err != nil {
-		return cfg, err
-	}
-	if len(fields) == 1 && !strings.Contains(fields[0], "=") {
-		cfg.Cmd = []string{fields[0]}
-		return cfg, nil
-	}
-	cfg.NoUser = true
-	cfg.NoCwd = true
-	for _, field := range fields {
-		parts := strings.SplitN(field, "=", 2)
-		if len(parts) != 2 {
-			return cfg, errors.Errorf("invalid value %s", field)
-		}
-		key := strings.ToLower(parts[0])
-		value := parts[1]
-		switch key {
-		case "args":
-			cfg.Cmd = append(cfg.Cmd, maybeJSONArray(value)...)
-		case "entrypoint":
-			cfg.Entrypoint = append(cfg.Entrypoint, maybeJSONArray(value)...)
-			if cfg.Cmd == nil {
-				cfg.Cmd = []string{}
-			}
-		case "env":
-			cfg.Env = append(cfg.Env, maybeJSONArray(value)...)
-		case "user":
-			cfg.User = value
-			cfg.NoUser = false
-		case "cwd":
-			cfg.Cwd = value
-			cfg.NoCwd = false
-		case "tty":
-			cfg.Tty, err = strconv.ParseBool(value)
-			if err != nil {
-				return cfg, errors.Errorf("failed to parse tty: %v", err)
-			}
-		default:
-			return cfg, errors.Errorf("unknown key %q", key)
-		}
-	}
-	return cfg, nil
-}
-
-func maybeJSONArray(v string) []string {
-	var list []string
-	if err := json.Unmarshal([]byte(v), &list); err == nil {
-		return list
-	}
-	return []string{v}
-}
-
-func listToMap(values []string, defaultEnv bool) map[string]string {
+func listToMap(values []string, defaultEnv bool) (map[string]string, error) {
 	result := make(map[string]string, len(values))
 	for _, value := range values {
-		kv := strings.SplitN(value, "=", 2)
-		if len(kv) == 1 {
-			if defaultEnv {
-				v, ok := os.LookupEnv(kv[0])
-				if ok {
-					result[kv[0]] = v
-				}
-			} else {
-				result[kv[0]] = ""
+		k, v, hasValue := strings.Cut(value, "=")
+		if k == "" {
+			return nil, errors.Errorf("invalid key-value pair %q: empty key", value)
+		}
+		if hasValue {
+			result[k] = v
+		} else if defaultEnv {
+			if envVal, ok := os.LookupEnv(k); ok {
+				result[k] = envVal
 			}
 		} else {
-			result[kv[0]] = kv[1]
+			result[k] = ""
 		}
 	}
-	return result
+	return result, nil
 }
 
 func dockerUlimitToControllerUlimit(u *dockeropts.UlimitOpt) *controllerapi.UlimitOpt {
@@ -799,8 +748,8 @@ func dockerUlimitToControllerUlimit(u *dockeropts.UlimitOpt) *controllerapi.Ulim
 	return &controllerapi.UlimitOpt{Values: values}
 }
 
-func printWarnings(w io.Writer, warnings []client.VertexWarning, mode string) {
-	if len(warnings) == 0 || mode == progress.PrinterModeQuiet {
+func printWarnings(w io.Writer, warnings []client.VertexWarning, mode progressui.DisplayMode) {
+	if len(warnings) == 0 || mode == progressui.QuietMode {
 		return
 	}
 	fmt.Fprintf(w, "\n ")
@@ -871,4 +820,109 @@ func printValue(printer printFunc, version string, format string, res map[string
 		return nil
 	}
 	return printer([]byte(res["result.json"]), os.Stdout)
+}
+
+type invokeConfig struct {
+	controllerapi.InvokeConfig
+	onFlag     string
+	invokeFlag string
+}
+
+func (cfg *invokeConfig) needsDebug(retErr error) bool {
+	switch cfg.onFlag {
+	case "always":
+		return true
+	case "error":
+		return retErr != nil
+	default:
+		return cfg.invokeFlag != ""
+	}
+}
+
+func (cfg *invokeConfig) runDebug(ctx context.Context, ref string, options *controllerapi.BuildOptions, c control.BuildxController, stdin io.ReadCloser, stdout io.WriteCloser, stderr console.File, progress *progress.Printer) (*monitor.MonitorBuildResult, error) {
+	con := console.Current()
+	if err := con.SetRaw(); err != nil {
+		// TODO: run disconnect in build command (on error case)
+		if err := c.Disconnect(ctx, ref); err != nil {
+			logrus.Warnf("disconnect error: %v", err)
+		}
+		return nil, errors.Errorf("failed to configure terminal: %v", err)
+	}
+	defer con.Reset()
+	return monitor.RunMonitor(ctx, ref, options, cfg.InvokeConfig, c, stdin, stdout, stderr, progress)
+}
+
+func (cfg *invokeConfig) parseInvokeConfig(invoke, on string) error {
+	cfg.onFlag = on
+	cfg.invokeFlag = invoke
+	cfg.Tty = true
+	cfg.NoCmd = true
+	switch invoke {
+	case "default", "":
+		return nil
+	case "on-error":
+		// NOTE: we overwrite the command to run because the original one should fail on the failed step.
+		// TODO: make this configurable via flags or restorable from LLB.
+		// Discussion: https://github.com/docker/buildx/pull/1640#discussion_r1113295900
+		cfg.Cmd = []string{"/bin/sh"}
+		cfg.NoCmd = false
+		return nil
+	}
+
+	csvReader := csv.NewReader(strings.NewReader(invoke))
+	csvReader.LazyQuotes = true
+	fields, err := csvReader.Read()
+	if err != nil {
+		return err
+	}
+	if len(fields) == 1 && !strings.Contains(fields[0], "=") {
+		cfg.Cmd = []string{fields[0]}
+		cfg.NoCmd = false
+		return nil
+	}
+	cfg.NoUser = true
+	cfg.NoCwd = true
+	for _, field := range fields {
+		parts := strings.SplitN(field, "=", 2)
+		if len(parts) != 2 {
+			return errors.Errorf("invalid value %s", field)
+		}
+		key := strings.ToLower(parts[0])
+		value := parts[1]
+		switch key {
+		case "args":
+			cfg.Cmd = append(cfg.Cmd, maybeJSONArray(value)...)
+			cfg.NoCmd = false
+		case "entrypoint":
+			cfg.Entrypoint = append(cfg.Entrypoint, maybeJSONArray(value)...)
+			if cfg.Cmd == nil {
+				cfg.Cmd = []string{}
+				cfg.NoCmd = false
+			}
+		case "env":
+			cfg.Env = append(cfg.Env, maybeJSONArray(value)...)
+		case "user":
+			cfg.User = value
+			cfg.NoUser = false
+		case "cwd":
+			cfg.Cwd = value
+			cfg.NoCwd = false
+		case "tty":
+			cfg.Tty, err = strconv.ParseBool(value)
+			if err != nil {
+				return errors.Errorf("failed to parse tty: %v", err)
+			}
+		default:
+			return errors.Errorf("unknown key %q", key)
+		}
+	}
+	return nil
+}
+
+func maybeJSONArray(v string) []string {
+	var list []string
+	if err := json.Unmarshal([]byte(v), &list); err == nil {
+		return list
+	}
+	return []string{v}
 }

@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 
+	debugcmd "github.com/docker/buildx/commands/debug"
 	imagetoolscmd "github.com/docker/buildx/commands/imagetools"
 	"github.com/docker/buildx/controller/remote"
 	"github.com/docker/buildx/util/cobrautil/completion"
@@ -11,6 +12,7 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/debug"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -40,6 +42,11 @@ func NewRootCmd(name string, isPlugin bool, dockerCli command.Cli) *cobra.Comman
 		cmd.TraverseChildren = true
 		cmd.DisableFlagsInUseLine = true
 		cli.DisableFlagsInUseLine(cmd)
+
+		// DEBUG=1 should perform the same as --debug at the docker root level
+		if debug.IsEnabled() {
+			debug.Enable()
+		}
 	}
 
 	logrus.SetFormatter(&logutil.Formatter{})
@@ -50,17 +57,6 @@ func NewRootCmd(name string, isPlugin bool, dockerCli command.Cli) *cobra.Comman
 		"serving grpc connection",
 		"stopping session",
 		"using default config store",
-	))
-
-	// filter out useless commandConn.CloseWrite warning message that can occur
-	// when listing builder instances with "buildx ls" for those that are
-	// unreachable: "commandConn.CloseWrite: commandconn: failed to wait: signal: killed"
-	// https://github.com/docker/cli/blob/3fb4fb83dfb5db0c0753a8316f21aea54dab32c5/cli/connhelper/commandconn/commandconn.go#L203-L214
-	logrus.AddHook(logutil.NewFilter([]logrus.Level{
-		logrus.WarnLevel,
-	},
-		"commandConn.CloseWrite:",
-		"commandConn.CloseRead:",
 	))
 
 	addCommands(cmd, dockerCli)
@@ -76,7 +72,7 @@ func addCommands(cmd *cobra.Command, dockerCli command.Cli) {
 	rootFlags(opts, cmd.PersistentFlags())
 
 	cmd.AddCommand(
-		buildCmd(dockerCli, opts),
+		buildCmd(dockerCli, opts, nil),
 		bakeCmd(dockerCli, opts),
 		createCmd(dockerCli),
 		rmCmd(dockerCli, opts),
@@ -92,8 +88,10 @@ func addCommands(cmd *cobra.Command, dockerCli command.Cli) {
 		imagetoolscmd.RootCmd(dockerCli, imagetoolscmd.RootOptions{Builder: &opts.builder}),
 	)
 	if isExperimental() {
+		cmd.AddCommand(debugcmd.RootCmd(dockerCli,
+			newDebuggableBuild(dockerCli, opts),
+		))
 		remote.AddControllerCommands(cmd, dockerCli)
-		addDebugShellCommand(cmd, dockerCli)
 	}
 
 	cmd.RegisterFlagCompletionFunc( //nolint:errcheck

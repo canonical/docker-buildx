@@ -613,7 +613,7 @@ func Parse(b hcl.Body, opt Opt, val interface{}) (map[string]map[string][]string
 
 	attrs, diags := b.JustAttributes()
 	if diags.HasErrors() {
-		if d := removeAttributesDiags(diags, reserved, p.vars); len(d) > 0 {
+		if d := removeAttributesDiags(diags, reserved, p.vars, attrs); len(d) > 0 {
 			return nil, d
 		}
 	}
@@ -631,13 +631,14 @@ func Parse(b hcl.Body, opt Opt, val interface{}) (map[string]map[string][]string
 	}
 
 	for _, a := range content.Attributes {
+		a := a
 		return nil, hcl.Diagnostics{
 			&hcl.Diagnostic{
 				Severity: hcl.DiagError,
 				Summary:  "Invalid attribute",
 				Detail:   "global attributes currently not supported",
-				Subject:  &a.Range,
-				Context:  &a.Range,
+				Subject:  a.Range.Ptr(),
+				Context:  a.Range.Ptr(),
 			},
 		}
 	}
@@ -660,13 +661,14 @@ func Parse(b hcl.Body, opt Opt, val interface{}) (map[string]map[string][]string
 			var subject *hcl.Range
 			var context *hcl.Range
 			if p.funcs[k].Params != nil {
-				subject = &p.funcs[k].Params.Range
+				subject = p.funcs[k].Params.Range.Ptr()
 				context = subject
 			} else {
 				for _, block := range blocks.Blocks {
+					block := block
 					if block.Type == "function" && len(block.Labels) == 1 && block.Labels[0] == k {
-						subject = &block.LabelRanges[0]
-						context = &block.DefRange
+						subject = block.LabelRanges[0].Ptr()
+						context = block.DefRange.Ptr()
 						break
 					}
 				}
@@ -732,6 +734,7 @@ func Parse(b hcl.Body, opt Opt, val interface{}) (map[string]map[string][]string
 
 	diags = hcl.Diagnostics{}
 	for _, b := range content.Blocks {
+		b := b
 		v := reflect.ValueOf(val)
 
 		err := p.resolveBlock(b, nil)
@@ -742,7 +745,7 @@ func Parse(b hcl.Body, opt Opt, val interface{}) (map[string]map[string][]string
 					continue
 				}
 			} else {
-				return nil, wrapErrorDiagnostic("Invalid block", err, &b.LabelRanges[0], &b.DefRange)
+				return nil, wrapErrorDiagnostic("Invalid block", err, b.LabelRanges[0].Ptr(), b.DefRange.Ptr())
 			}
 		}
 
@@ -854,7 +857,7 @@ func getNameIndex(v reflect.Value) (int, bool) {
 	return 0, false
 }
 
-func removeAttributesDiags(diags hcl.Diagnostics, reserved map[string]struct{}, vars map[string]*variable) hcl.Diagnostics {
+func removeAttributesDiags(diags hcl.Diagnostics, reserved map[string]struct{}, vars map[string]*variable, attrs hcl.Attributes) hcl.Diagnostics {
 	var fdiags hcl.Diagnostics
 	for _, d := range diags {
 		if fout := func(d *hcl.Diagnostic) bool {
@@ -873,6 +876,12 @@ func removeAttributesDiags(diags hcl.Diagnostics, reserved map[string]struct{}, 
 			for v := range vars {
 				// Do the same for global variables
 				if strings.HasPrefix(d.Detail, fmt.Sprintf(`Argument "%s" was already set at `, v)) {
+					return true
+				}
+			}
+			for a := range attrs {
+				// Do the same for attributes
+				if strings.HasPrefix(d.Detail, fmt.Sprintf(`Argument "%s" was already set at `, a)) {
 					return true
 				}
 			}

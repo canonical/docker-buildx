@@ -41,12 +41,10 @@ Key features:
     - [`buildx imagetools create`](docs/reference/buildx_imagetools_create.md)
     - [`buildx imagetools inspect`](docs/reference/buildx_imagetools_inspect.md)
   - [`buildx inspect`](docs/reference/buildx_inspect.md)
-  - [`buildx install`](docs/reference/buildx_install.md)
   - [`buildx ls`](docs/reference/buildx_ls.md)
   - [`buildx prune`](docs/reference/buildx_prune.md)
   - [`buildx rm`](docs/reference/buildx_rm.md)
   - [`buildx stop`](docs/reference/buildx_stop.md)
-  - [`buildx uninstall`](docs/reference/buildx_uninstall.md)
   - [`buildx use`](docs/reference/buildx_use.md)
   - [`buildx version`](docs/reference/buildx_version.md)
 - [Contributing](#contributing)
@@ -71,8 +69,9 @@ for Windows and macOS.
 
 ## Linux packages
 
-Docker Linux packages also include Docker Buildx when installed using the
-[DEB or RPM packages](https://docs.docker.com/engine/install/).
+Docker Engine package repositories contain Docker Buildx packages when installed according to the
+[Docker Engine install documentation](https://docs.docker.com/engine/install/). Install the
+`docker-buildx-plugin` package to install the Buildx plugin.
 
 ## Manual download
 
@@ -148,7 +147,7 @@ $ DOCKER_BUILDKIT=1 docker build --platform=local -o . "https://github.com/docke
 $ mkdir -p ~/.docker/cli-plugins
 $ mv buildx ~/.docker/cli-plugins/docker-buildx
 
-# Local 
+# Local
 $ git clone https://github.com/docker/buildx.git && cd buildx
 $ make install
 ```
@@ -240,7 +239,7 @@ When you invoke a build, you can set the `--platform` flag to specify the target
 platform for the build output, (for example, `linux/amd64`, `linux/arm64`, or
 `darwin/amd64`).
 
-When the current builder instance is backed by the `docker-container` or 
+When the current builder instance is backed by the `docker-container` or
 `kubernetes` driver, you can specify multiple platforms together. In this case,
 it builds a manifest list which contains images for all specified architectures.
 When you use this image in [`docker run`](https://docs.docker.com/engine/reference/commandline/run/)

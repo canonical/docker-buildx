@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	composecli "github.com/compose-spec/compose-go/cli"
 	"github.com/docker/buildx/bake/hclparser"
@@ -18,9 +19,10 @@ import (
 	controllerapi "github.com/docker/buildx/controller/pb"
 	"github.com/docker/buildx/util/buildflags"
 	"github.com/docker/buildx/util/platformutil"
-
+	"github.com/docker/buildx/util/progress"
 	"github.com/docker/cli/cli/config"
 	hcl "github.com/hashicorp/hcl/v2"
+	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/pkg/errors"
@@ -55,7 +57,7 @@ func defaultFilenames() []string {
 	return names
 }
 
-func ReadLocalFiles(names []string, stdin io.Reader) ([]File, error) {
+func ReadLocalFiles(names []string, stdin io.Reader, l progress.SubLogger) ([]File, error) {
 	isDefault := false
 	if len(names) == 0 {
 		isDefault = true
@@ -63,26 +65,114 @@ func ReadLocalFiles(names []string, stdin io.Reader) ([]File, error) {
 	}
 	out := make([]File, 0, len(names))
 
+	setStatus := func(st *client.VertexStatus) {
+		if l != nil {
+			l.SetStatus(st)
+		}
+	}
+
 	for _, n := range names {
 		var dt []byte
 		var err error
 		if n == "-" {
-			dt, err = io.ReadAll(stdin)
+			dt, err = readWithProgress(stdin, setStatus)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			dt, err = os.ReadFile(n)
+			dt, err = readFileWithProgress(n, isDefault, setStatus)
+			if dt == nil && err == nil {
+				continue
+			}
 			if err != nil {
-				if isDefault && errors.Is(err, os.ErrNotExist) {
-					continue
-				}
 				return nil, err
 			}
 		}
 		out = append(out, File{Name: n, Data: dt})
 	}
 	return out, nil
+}
+
+func readFileWithProgress(fname string, isDefault bool, setStatus func(st *client.VertexStatus)) (dt []byte, err error) {
+	st := &client.VertexStatus{
+		ID: "reading " + fname,
+	}
+
+	defer func() {
+		now := time.Now()
+		st.Completed = &now
+		if dt != nil || err != nil {
+			setStatus(st)
+		}
+	}()
+
+	now := time.Now()
+	st.Started = &now
+
+	f, err := os.Open(fname)
+	if err != nil {
+		if isDefault && errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	setStatus(st)
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	st.Total = info.Size()
+	setStatus(st)
+
+	buf := make([]byte, 1024)
+	for {
+		n, err := f.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		dt = append(dt, buf[:n]...)
+		st.Current += int64(n)
+		setStatus(st)
+	}
+
+	return dt, nil
+}
+
+func readWithProgress(r io.Reader, setStatus func(st *client.VertexStatus)) (dt []byte, err error) {
+	st := &client.VertexStatus{
+		ID: "reading from stdin",
+	}
+
+	defer func() {
+		now := time.Now()
+		st.Completed = &now
+		setStatus(st)
+	}()
+
+	now := time.Now()
+	st.Started = &now
+	setStatus(st)
+
+	buf := make([]byte, 1024)
+	for {
+		n, err := r.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		dt = append(dt, buf[:n]...)
+		st.Current += int64(n)
+		setStatus(st)
+	}
+
+	return dt, nil
 }
 
 func ListTargets(files []File) ([]string, error) {
@@ -248,7 +338,7 @@ func ParseFiles(files []File, defaults map[string]string) (_ *Config, err error)
 	}
 
 	if len(hclFiles) > 0 {
-		renamed, err := hclparser.Parse(hcl.MergeFiles(hclFiles), hclparser.Opt{
+		renamed, err := hclparser.Parse(hclparser.MergeFiles(hclFiles), hclparser.Opt{
 			LookupVar:     os.LookupEnv,
 			Vars:          defaults,
 			ValidateLabel: validateTargetName,
@@ -587,9 +677,10 @@ type Target struct {
 	Name string `json:"-" hcl:"name,label" cty:"name"`
 
 	// Inherits is the only field that cannot be overridden with --set
-	Attest   []string `json:"attest,omitempty" hcl:"attest,optional" cty:"attest"`
 	Inherits []string `json:"inherits,omitempty" hcl:"inherits,optional" cty:"inherits"`
 
+	Annotations      []string           `json:"annotations,omitempty" hcl:"annotations,optional" cty:"annotations"`
+	Attest           []string           `json:"attest,omitempty" hcl:"attest,optional" cty:"attest"`
 	Context          *string            `json:"context,omitempty" hcl:"context,optional" cty:"context"`
 	Contexts         map[string]string  `json:"contexts,omitempty" hcl:"contexts,optional" cty:"contexts"`
 	Dockerfile       *string            `json:"dockerfile,omitempty" hcl:"dockerfile,optional" cty:"dockerfile"`
@@ -620,6 +711,7 @@ var _ hclparser.WithEvalContexts = &Group{}
 var _ hclparser.WithGetName = &Group{}
 
 func (t *Target) normalize() {
+	t.Annotations = removeDupes(t.Annotations)
 	t.Attest = removeAttestDupes(t.Attest)
 	t.Tags = removeDupes(t.Tags)
 	t.Secrets = removeDupes(t.Secrets)
@@ -679,6 +771,9 @@ func (t *Target) Merge(t2 *Target) {
 	}
 	if t2.Target != nil {
 		t.Target = t2.Target
+	}
+	if t2.Annotations != nil { // merge
+		t.Annotations = append(t.Annotations, t2.Annotations...)
 	}
 	if t2.Attest != nil { // merge
 		t.Attest = append(t.Attest, t2.Attest...)
@@ -766,6 +861,8 @@ func (t *Target) AddOverrides(overrides map[string]Override) error {
 			t.Platforms = o.ArrValue
 		case "output":
 			t.Outputs = o.ArrValue
+		case "annotations":
+			t.Annotations = append(t.Annotations, o.ArrValue...)
 		case "attest":
 			t.Attest = append(t.Attest, o.ArrValue...)
 		case "no-cache":
@@ -852,8 +949,10 @@ func (t *Target) GetEvalContexts(ectx *hcl.EvalContext, block *hcl.Block, loadDe
 			for _, e := range ectxs {
 				e2 := ectx.NewChild()
 				e2.Variables = make(map[string]cty.Value)
-				for k, v := range e.Variables {
-					e2.Variables[k] = v
+				if e != ectx {
+					for k, v := range e.Variables {
+						e2.Variables[k] = v
+					}
 				}
 				e2.Variables[k] = v
 				ectxs2 = append(ectxs2, e2)
@@ -1038,6 +1137,9 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	if t.Dockerfile != nil {
 		dockerfilePath = *t.Dockerfile
 	}
+	if !strings.HasPrefix(dockerfilePath, "cwd://") {
+		dockerfilePath = path.Clean(dockerfilePath)
+	}
 
 	bi := build.Inputs{
 		ContextPath:    contextPath,
@@ -1048,11 +1150,43 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 		bi.DockerfileInline = *t.DockerfileInline
 	}
 	updateContext(&bi, inp)
-	if !build.IsRemoteURL(bi.ContextPath) && bi.ContextState == nil && !path.IsAbs(bi.DockerfilePath) {
-		bi.DockerfilePath = path.Join(bi.ContextPath, bi.DockerfilePath)
+	if strings.HasPrefix(bi.DockerfilePath, "cwd://") {
+		// If Dockerfile is local for a remote invocation, we first check if
+		// it's not outside the working directory and then resolve it to an
+		// absolute path.
+		bi.DockerfilePath = path.Clean(strings.TrimPrefix(bi.DockerfilePath, "cwd://"))
+		if err := checkPath(bi.DockerfilePath); err != nil {
+			return nil, err
+		}
+		var err error
+		bi.DockerfilePath, err = filepath.Abs(bi.DockerfilePath)
+		if err != nil {
+			return nil, err
+		}
+	} else if !build.IsRemoteURL(bi.DockerfilePath) && strings.HasPrefix(bi.ContextPath, "cwd://") && (inp != nil && build.IsRemoteURL(inp.URL)) {
+		// We don't currently support reading a remote Dockerfile with a local
+		// context when doing a remote invocation because we automatically
+		// derive the dockerfile from the context atm:
+		//
+		// target "default" {
+		//  context = BAKE_CMD_CONTEXT
+		//  dockerfile = "Dockerfile.app"
+		// }
+		//
+		// > docker buildx bake https://github.com/foo/bar.git
+		// failed to solve: failed to read dockerfile: open /var/lib/docker/tmp/buildkit-mount3004544897/Dockerfile.app: no such file or directory
+		//
+		// To avoid mistakenly reading a local Dockerfile, we check if the
+		// Dockerfile exists locally and if so, we error out.
+		if _, err := os.Stat(filepath.Join(path.Clean(strings.TrimPrefix(bi.ContextPath, "cwd://")), bi.DockerfilePath)); err == nil {
+			return nil, errors.Errorf("reading a dockerfile for a remote build invocation is currently not supported")
+		}
 	}
 	if strings.HasPrefix(bi.ContextPath, "cwd://") {
 		bi.ContextPath = path.Clean(strings.TrimPrefix(bi.ContextPath, "cwd://"))
+	}
+	if !build.IsRemoteURL(bi.ContextPath) && bi.ContextState == nil && !path.IsAbs(bi.DockerfilePath) {
+		bi.DockerfilePath = path.Join(bi.ContextPath, bi.DockerfilePath)
 	}
 	for k, v := range bi.NamedContexts {
 		if strings.HasPrefix(v.Path, "cwd://") {
@@ -1114,7 +1248,7 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	bo.Platforms = platforms
 
 	dockerConfig := config.LoadDefaultConfigFile(os.Stderr)
-	bo.Session = append(bo.Session, authprovider.NewDockerAuthProvider(dockerConfig))
+	bo.Session = append(bo.Session, authprovider.NewDockerAuthProvider(dockerConfig, nil))
 
 	secrets, err := buildflags.ParseSecretSpecs(t.Secrets)
 	if err != nil {
@@ -1162,6 +1296,16 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	bo.Exports, err = controllerapi.CreateExports(outputs)
 	if err != nil {
 		return nil, err
+	}
+
+	annotations, err := buildflags.ParseAnnotations(t.Annotations)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range bo.Exports {
+		for k, v := range annotations {
+			e.Attrs[k.String()] = v
+		}
 	}
 
 	attests, err := buildflags.ParseAttests(t.Attest)

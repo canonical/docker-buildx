@@ -1,3 +1,13 @@
+docker-buildx (0.12.1-0ubuntu1) noble; urgency=medium
+
+  * New upstream release.
+  * d/copyright: remove superfluous file pattern
+  * Build with Go 1.21, recommended by upstream
+    - d/control: b-d on golang-1.21-go instead of golang-go.
+    - d/rules: add Go 1.21 binary to the $PATH.
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Mon, 19 Feb 2024 17:35:26 -0300
+
 docker-buildx (0.11.2-0ubuntu1~22.04.2) jammy-security; urgency=medium
 
   * No change rebuild due to golang-1.20, golang-1.21 updates
