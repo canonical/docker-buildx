@@ -13,9 +13,9 @@ const maxBuffer = 256
 var exp = &Exporter{}
 
 func init() {
-	detect.Register("delegated", func() (sdktrace.SpanExporter, error) {
+	detect.Register("delegated", detect.TraceExporterDetector(func() (sdktrace.SpanExporter, error) {
 		return exp, nil
-	}, 100)
+	}), 100)
 }
 
 type Exporter struct {

@@ -37,6 +37,10 @@ func (w *containerWorker) Rootless() bool {
 	return false
 }
 
+func (w *containerWorker) NetNSDetached() bool {
+	return false
+}
+
 func (w *containerWorker) New(ctx context.Context, cfg *integration.BackendConfig) (integration.Backend, func() error, error) {
 	w.dockerOnce.Do(func() {
 		w.docker, w.dockerClose, w.dockerErr = dockerWorker{id: w.id}.New(ctx, cfg)
@@ -54,7 +58,7 @@ func (w *containerWorker) New(ctx context.Context, cfg *integration.BackendConfi
 	cmd := exec.Command("buildx", "create",
 		"--bootstrap",
 		"--name="+name,
-		"--config="+cfgfile,
+		"--buildkitd-config="+cfgfile,
 		"--driver=docker-container",
 		"--driver-opt=network=host",
 	)

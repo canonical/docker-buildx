@@ -2,8 +2,11 @@ package builder
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
+	"strings"
 
+	"github.com/containerd/containerd/platforms"
 	"github.com/docker/buildx/driver"
 	ctxkube "github.com/docker/buildx/driver/kubernetes/context"
 	"github.com/docker/buildx/store"
@@ -139,7 +142,7 @@ func (b *Builder) LoadNodes(ctx context.Context, opts ...LoadNodesOption) (_ []N
 					}
 				}
 
-				d, err := driver.GetDriver(ctx, "buildx_buildkit_"+n.Name, factory, n.Endpoint, dockerapi, imageopt.Auth, kcc, n.Flags, n.Files, n.DriverOpts, n.Platforms, b.opts.contextPathHash, lno.dialMeta)
+				d, err := driver.GetDriver(ctx, driver.BuilderName(n.Name), factory, n.Endpoint, dockerapi, imageopt.Auth, kcc, n.BuildkitdFlags, n.Files, n.DriverOpts, n.Platforms, b.opts.contextPathHash, lno.dialMeta)
 				if err != nil {
 					node.Err = err
 					return nil
@@ -197,6 +200,51 @@ func (b *Builder) LoadNodes(ctx context.Context, opts ...LoadNodesOption) (_ []N
 	}
 
 	return b.nodes, nil
+}
+
+func (n *Node) MarshalJSON() ([]byte, error) {
+	var status string
+	if n.DriverInfo != nil {
+		status = n.DriverInfo.Status.String()
+	}
+	var nerr string
+	if n.Err != nil {
+		status = "error"
+		nerr = strings.TrimSpace(n.Err.Error())
+	}
+	var pp []string
+	for _, p := range n.Platforms {
+		pp = append(pp, platforms.Format(p))
+	}
+	return json.Marshal(struct {
+		Name           string
+		Endpoint       string
+		BuildkitdFlags []string           `json:"Flags,omitempty"`
+		DriverOpts     map[string]string  `json:",omitempty"`
+		Files          map[string][]byte  `json:",omitempty"`
+		Status         string             `json:",omitempty"`
+		ProxyConfig    map[string]string  `json:",omitempty"`
+		Version        string             `json:",omitempty"`
+		Err            string             `json:",omitempty"`
+		IDs            []string           `json:",omitempty"`
+		Platforms      []string           `json:",omitempty"`
+		GCPolicy       []client.PruneInfo `json:",omitempty"`
+		Labels         map[string]string  `json:",omitempty"`
+	}{
+		Name:           n.Name,
+		Endpoint:       n.Endpoint,
+		BuildkitdFlags: n.BuildkitdFlags,
+		DriverOpts:     n.DriverOpts,
+		Files:          n.Files,
+		Status:         status,
+		ProxyConfig:    n.ProxyConfig,
+		Version:        n.Version,
+		Err:            nerr,
+		IDs:            n.IDs,
+		Platforms:      pp,
+		GCPolicy:       n.GCPolicy,
+		Labels:         n.Labels,
+	})
 }
 
 func (n *Node) loadData(ctx context.Context) error {
