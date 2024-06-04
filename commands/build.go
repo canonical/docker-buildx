@@ -3,8 +3,10 @@ package commands
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/containerd/console"
 	"github.com/docker/buildx/build"
@@ -27,8 +31,12 @@ import (
 	"github.com/docker/buildx/store"
 	"github.com/docker/buildx/store/storeutil"
 	"github.com/docker/buildx/util/buildflags"
+	"github.com/docker/buildx/util/cobrautil"
+	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/desktop"
 	"github.com/docker/buildx/util/ioset"
+	"github.com/docker/buildx/util/metricutil"
+	"github.com/docker/buildx/util/osutil"
 	"github.com/docker/buildx/util/progress"
 	"github.com/docker/buildx/util/tracing"
 	"github.com/docker/cli-docs-tool/annotation"
@@ -40,10 +48,10 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/frontend/subrequests"
+	"github.com/moby/buildkit/frontend/subrequests/lint"
 	"github.com/moby/buildkit/frontend/subrequests/outline"
 	"github.com/moby/buildkit/frontend/subrequests/targets"
 	"github.com/moby/buildkit/solver/errdefs"
-	"github.com/moby/buildkit/util/appcontext"
 	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/morikuni/aec"
@@ -51,6 +59,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc/codes"
 )
 
@@ -196,6 +206,8 @@ func (o *buildOptions) toControllerOptions() (*controllerapi.BuildOptions, error
 		return nil, err
 	}
 
+	opts.WithProvenanceResponse = opts.PrintFunc == nil && len(o.metadataFile) > 0
+
 	return &opts, nil
 }
 
@@ -210,8 +222,55 @@ func (o *buildOptions) toDisplayMode() (progressui.DisplayMode, error) {
 	return progress, nil
 }
 
-func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
-	ctx := appcontext.Context()
+func buildMetricAttributes(dockerCli command.Cli, b *builder.Builder, options *buildOptions) attribute.Set {
+	return attribute.NewSet(
+		attribute.String("command.name", "build"),
+		attribute.Stringer("command.options.hash", &buildOptionsHash{
+			buildOptions: options,
+			configDir:    confutil.ConfigDir(dockerCli),
+		}),
+		attribute.String("driver.name", options.builder),
+		attribute.String("driver.type", b.Driver),
+	)
+}
+
+// buildOptionsHash computes a hash for the buildOptions when the String method is invoked.
+// This is done so we can delay the computation of the hash until needed by OTEL using
+// the fmt.Stringer interface.
+type buildOptionsHash struct {
+	*buildOptions
+	configDir  string
+	result     string
+	resultOnce sync.Once
+}
+
+func (o *buildOptionsHash) String() string {
+	o.resultOnce.Do(func() {
+		target := o.target
+		contextPath := o.contextPath
+		dockerfile := o.dockerfileName
+		if dockerfile == "" {
+			dockerfile = "Dockerfile"
+		}
+
+		if contextPath != "-" && osutil.IsLocalDir(contextPath) {
+			contextPath = osutil.ToAbs(contextPath)
+		}
+		salt := confutil.TryNodeIdentifier(o.configDir)
+
+		h := sha256.New()
+		for _, s := range []string{target, contextPath, dockerfile, salt} {
+			_, _ = io.WriteString(h, s)
+			h.Write([]byte{0})
+		}
+		o.result = hex.EncodeToString(h.Sum(nil))
+	})
+	return o.result
+}
+
+func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) (err error) {
+	mp := dockerCli.MeterProvider()
+
 	ctx, end, err := tracing.TraceCurrentCommand(ctx, "build")
 	if err != nil {
 		return err
@@ -252,6 +311,7 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 	if _, err := console.ConsoleFromFile(os.Stderr); err == nil {
 		term = true
 	}
+	attributes := buildMetricAttributes(dockerCli, b, &options)
 
 	ctx2, cancel := context.WithCancel(context.TODO())
 	defer cancel()
@@ -265,6 +325,7 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 			fmt.Sprintf("building with %q instance using %s driver", b.Name, b.Driver),
 			fmt.Sprintf("%s:%s", b.Driver, b.Name),
 		),
+		progress.WithMetrics(mp, attributes),
 		progress.WithOnClose(func() {
 			printWarnings(os.Stderr, printer.Warnings(), progressMode)
 		}),
@@ -273,9 +334,10 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 		return err
 	}
 
+	done := timeBuildCommand(mp, attributes)
 	var resp *client.SolveResponse
 	var retErr error
-	if isExperimental() {
+	if confutil.IsExperimental() {
 		resp, retErr = runControllerBuild(ctx, dockerCli, opts, options, printer)
 	} else {
 		resp, retErr = runBasicBuild(ctx, dockerCli, opts, options, printer)
@@ -284,27 +346,31 @@ func runBuild(dockerCli command.Cli, options buildOptions) (err error) {
 	if err := printer.Wait(); retErr == nil {
 		retErr = err
 	}
+
+	done(retErr)
 	if retErr != nil {
 		return retErr
 	}
 
-	if progressMode != progressui.QuietMode {
-		desktop.PrintBuildDetails(os.Stderr, printer.BuildRefs(), term)
-	} else {
+	switch progressMode {
+	case progressui.RawJSONMode:
+		// no additional display
+	case progressui.QuietMode:
 		fmt.Println(getImageID(resp.ExporterResponse))
+	default:
+		desktop.PrintBuildDetails(os.Stderr, printer.BuildRefs(), term)
 	}
 	if options.imageIDFile != "" {
 		if err := os.WriteFile(options.imageIDFile, []byte(getImageID(resp.ExporterResponse)), 0644); err != nil {
 			return errors.Wrap(err, "writing image ID file")
 		}
 	}
-	if options.metadataFile != "" {
-		if err := writeMetadataFile(options.metadataFile, decodeExporterResponse(resp.ExporterResponse)); err != nil {
-			return err
-		}
-	}
 	if opts.PrintFunc != nil {
 		if err := printResult(opts.PrintFunc, resp.ExporterResponse); err != nil {
+			return err
+		}
+	} else if options.metadataFile != "" {
+		if err := writeMetadataFile(options.metadataFile, decodeExporterResponse(resp.ExporterResponse)); err != nil {
 			return err
 		}
 	}
@@ -353,14 +419,22 @@ func runControllerBuild(ctx context.Context, dockerCli command.Cli, opts *contro
 	var ref string
 	var retErr error
 	var resp *client.SolveResponse
-	f := ioset.NewSingleForwarder()
-	f.SetReader(dockerCli.In())
-	pr, pw := io.Pipe()
-	f.SetWriter(pw, func() io.WriteCloser {
-		pw.Close() // propagate EOF
-		logrus.Debug("propagating stdin close")
-		return nil
-	})
+
+	var f *ioset.SingleForwarder
+	var pr io.ReadCloser
+	var pw io.WriteCloser
+	if options.invokeConfig == nil {
+		pr = dockerCli.In()
+	} else {
+		f = ioset.NewSingleForwarder()
+		f.SetReader(dockerCli.In())
+		pr, pw = io.Pipe()
+		f.SetWriter(pw, func() io.WriteCloser {
+			pw.Close() // propagate EOF
+			logrus.Debug("propagating stdin close")
+			return nil
+		})
+	}
 
 	ref, resp, err = c.Build(ctx, *opts, pr, printer)
 	if err != nil {
@@ -374,11 +448,13 @@ func runControllerBuild(ctx context.Context, dockerCli command.Cli, opts *contro
 		}
 	}
 
-	if err := pw.Close(); err != nil {
-		logrus.Debug("failed to close stdin pipe writer")
-	}
-	if err := pr.Close(); err != nil {
-		logrus.Debug("failed to close stdin pipe reader")
+	if options.invokeConfig != nil {
+		if err := pw.Close(); err != nil {
+			logrus.Debug("failed to close stdin pipe writer")
+		}
+		if err := pr.Close(); err != nil {
+			logrus.Debug("failed to close stdin pipe reader")
+		}
 	}
 
 	if options.invokeConfig != nil && options.invokeConfig.needsDebug(retErr) {
@@ -472,7 +548,7 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 				options.invokeConfig = iConfig
 			}
 
-			return runBuild(dockerCli, *options)
+			return runBuild(cmd.Context(), dockerCli, *options)
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			return nil, cobra.ShellCompDirectiveFilterDirs
@@ -487,7 +563,7 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 	flags := cmd.Flags()
 
 	flags.StringSliceVar(&options.extraHosts, "add-host", []string{}, `Add a custom host-to-IP mapping (format: "host:ip")`)
-	flags.SetAnnotation("add-host", annotation.ExternalURL, []string{"https://docs.docker.com/engine/reference/commandline/build/#add-host"})
+	flags.SetAnnotation("add-host", annotation.ExternalURL, []string{"https://docs.docker.com/reference/cli/docker/image/build/#add-host"})
 
 	flags.StringSliceVar(&options.allow, "allow", []string{}, `Allow extra privileged entitlement (e.g., "network.host", "security.insecure")`)
 
@@ -500,14 +576,14 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 	flags.StringArrayVar(&options.cacheTo, "cache-to", []string{}, `Cache export destinations (e.g., "user/app:cache", "type=local,dest=path/to/dir")`)
 
 	flags.StringVar(&options.cgroupParent, "cgroup-parent", "", `Set the parent cgroup for the "RUN" instructions during build`)
-	flags.SetAnnotation("cgroup-parent", annotation.ExternalURL, []string{"https://docs.docker.com/engine/reference/commandline/build/#cgroup-parent"})
+	flags.SetAnnotation("cgroup-parent", annotation.ExternalURL, []string{"https://docs.docker.com/reference/cli/docker/image/build/#cgroup-parent"})
 
 	flags.StringArrayVar(&options.contexts, "build-context", []string{}, "Additional build contexts (e.g., name=path)")
 
 	flags.StringVarP(&options.dockerfileName, "file", "f", "", `Name of the Dockerfile (default: "PATH/Dockerfile")`)
-	flags.SetAnnotation("file", annotation.ExternalURL, []string{"https://docs.docker.com/engine/reference/commandline/build/#file"})
+	flags.SetAnnotation("file", annotation.ExternalURL, []string{"https://docs.docker.com/reference/cli/docker/image/build/#file"})
 
-	flags.StringVar(&options.imageIDFile, "iidfile", "", "Write the image ID to the file")
+	flags.StringVar(&options.imageIDFile, "iidfile", "", "Write the image ID to a file")
 
 	flags.StringArrayVar(&options.labels, "label", []string{}, "Set metadata for an image")
 
@@ -521,9 +597,9 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 
 	flags.StringArrayVar(&options.platforms, "platform", platformsDefault, "Set target platform for build")
 
-	if isExperimental() {
+	if confutil.IsExperimental() {
 		flags.StringVar(&options.printFunc, "print", "", "Print result of information request (e.g., outline, targets)")
-		flags.SetAnnotation("print", "experimentalCLI", nil)
+		cobrautil.MarkFlagsExperimental(flags, "print")
 	}
 
 	flags.BoolVar(&options.exportPush, "push", false, `Shorthand for "--output=type=registry"`)
@@ -532,15 +608,15 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 
 	flags.StringArrayVar(&options.secrets, "secret", []string{}, `Secret to expose to the build (format: "id=mysecret[,src=/local/secret]")`)
 
-	flags.Var(&options.shmSize, "shm-size", `Size of "/dev/shm"`)
+	flags.Var(&options.shmSize, "shm-size", `Shared memory size for build containers`)
 
 	flags.StringArrayVar(&options.ssh, "ssh", []string{}, `SSH agent socket or keys to expose to the build (format: "default|<id>[=<socket>|<key>[,<key>]]")`)
 
 	flags.StringArrayVarP(&options.tags, "tag", "t", []string{}, `Name and optionally a tag (format: "name:tag")`)
-	flags.SetAnnotation("tag", annotation.ExternalURL, []string{"https://docs.docker.com/engine/reference/commandline/build/#tag"})
+	flags.SetAnnotation("tag", annotation.ExternalURL, []string{"https://docs.docker.com/reference/cli/docker/image/build/#tag"})
 
 	flags.StringVar(&options.target, "target", "", "Set the target build stage to build")
-	flags.SetAnnotation("target", annotation.ExternalURL, []string{"https://docs.docker.com/engine/reference/commandline/build/#target"})
+	flags.SetAnnotation("target", annotation.ExternalURL, []string{"https://docs.docker.com/reference/cli/docker/image/build/#target"})
 
 	options.ulimits = dockeropts.NewUlimitOpt(nil)
 	flags.Var(options.ulimits, "ulimit", "Ulimit options")
@@ -549,14 +625,12 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 	flags.StringVar(&options.sbom, "sbom", "", `Shorthand for "--attest=type=sbom"`)
 	flags.StringVar(&options.provenance, "provenance", "", `Shorthand for "--attest=type=provenance"`)
 
-	if isExperimental() {
+	if confutil.IsExperimental() {
 		// TODO: move this to debug command if needed
 		flags.StringVar(&options.Root, "root", "", "Specify root directory of server to connect")
-		flags.SetAnnotation("root", "experimentalCLI", nil)
 		flags.BoolVar(&options.Detach, "detach", false, "Detach buildx server (supported only on linux)")
-		flags.SetAnnotation("detach", "experimentalCLI", nil)
 		flags.StringVar(&options.ServerConfig, "server-config", "", "Specify buildx server config file (used only when launching new server)")
-		flags.SetAnnotation("server-config", "experimentalCLI", nil)
+		cobrautil.MarkFlagsExperimental(flags, "root", "detach", "server-config")
 	}
 
 	// hidden flags
@@ -579,7 +653,7 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugConfig *debug.D
 	flags.BoolVar(&ignoreBool, "squash", false, "Squash newly built layers into a single new layer")
 	flags.MarkHidden("squash")
 	flags.SetAnnotation("squash", "flag-warn", []string{"experimental flag squash is removed with BuildKit. You should squash inside build using a multi-stage Dockerfile for efficiency."})
-	flags.SetAnnotation("squash", "experimentalCLI", nil)
+	cobrautil.MarkFlagsExperimental(flags, "squash")
 
 	flags.StringVarP(&ignore, "memory", "m", "", "Memory limit")
 	flags.MarkHidden("memory")
@@ -624,7 +698,7 @@ func commonBuildFlags(options *commonFlags, flags *pflag.FlagSet) {
 	options.noCache = flags.Bool("no-cache", false, "Do not use cache when building the image")
 	flags.StringVar(&options.progress, "progress", "auto", `Set type of progress output ("auto", "plain", "tty"). Use plain to show container output`)
 	options.pull = flags.Bool("pull", false, "Always attempt to pull all referenced images")
-	flags.StringVar(&options.metadataFile, "metadata-file", "", "Write build result metadata to the file")
+	flags.StringVar(&options.metadataFile, "metadata-file", "", "Write build result metadata to a file")
 }
 
 func checkWarnedFlags(f *pflag.Flag) {
@@ -696,14 +770,6 @@ func (w *wrapped) Unwrap() error {
 	return w.err
 }
 
-func isExperimental() bool {
-	if v, ok := os.LookupEnv("BUILDX_EXPERIMENTAL"); ok {
-		vv, _ := strconv.ParseBool(v)
-		return vv
-	}
-	return false
-}
-
 func updateLastActivity(dockerCli command.Cli, ng *store.NodeGroup) error {
 	txn, release, err := storeutil.GetStore(dockerCli)
 	if err != nil {
@@ -749,7 +815,7 @@ func dockerUlimitToControllerUlimit(u *dockeropts.UlimitOpt) *controllerapi.Ulim
 }
 
 func printWarnings(w io.Writer, warnings []client.VertexWarning, mode progressui.DisplayMode) {
-	if len(warnings) == 0 || mode == progressui.QuietMode {
+	if len(warnings) == 0 || mode == progressui.QuietMode || mode == progressui.RawJSONMode {
 		return
 	}
 	fmt.Fprintf(w, "\n ")
@@ -796,11 +862,20 @@ func printResult(f *controllerapi.PrintFunc, res map[string]string) error {
 		return printValue(targets.PrintTargets, targets.SubrequestsTargetsDefinition.Version, f.Format, res)
 	case "subrequests.describe":
 		return printValue(subrequests.PrintDescribe, subrequests.SubrequestsDescribeDefinition.Version, f.Format, res)
+	case "lint":
+		return printValue(lint.PrintLintViolations, lint.SubrequestLintDefinition.Version, f.Format, res)
 	default:
-		if dt, ok := res["result.txt"]; ok {
+		if dt, ok := res["result.json"]; ok && f.Format == "json" {
+			fmt.Println(dt)
+		} else if dt, ok := res["result.txt"]; ok {
 			fmt.Print(dt)
 		} else {
 			log.Printf("%s %+v", f, res)
+		}
+	}
+	if v, ok := res["result.statuscode"]; !f.IgnoreStatus && ok {
+		if n, err := strconv.Atoi(v); err == nil && n != 0 {
+			os.Exit(n)
 		}
 	}
 	return nil
@@ -925,4 +1000,39 @@ func maybeJSONArray(v string) []string {
 		return list
 	}
 	return []string{v}
+}
+
+// timeBuildCommand will start a timer for timing the build command. It records the time when the returned
+// function is invoked into a metric.
+func timeBuildCommand(mp metric.MeterProvider, attrs attribute.Set) func(err error) {
+	meter := metricutil.Meter(mp)
+	counter, _ := meter.Float64Counter("command.time",
+		metric.WithDescription("Measures the duration of the build command."),
+		metric.WithUnit("ms"),
+	)
+
+	start := time.Now()
+	return func(err error) {
+		dur := float64(time.Since(start)) / float64(time.Millisecond)
+		extraAttrs := attribute.NewSet()
+		if err != nil {
+			extraAttrs = attribute.NewSet(
+				attribute.String("error.type", otelErrorType(err)),
+			)
+		}
+		counter.Add(context.Background(), dur,
+			metric.WithAttributeSet(attrs),
+			metric.WithAttributeSet(extraAttrs),
+		)
+	}
+}
+
+// otelErrorType returns an attribute for the error type based on the error category.
+// If nil, this function returns an invalid attribute.
+func otelErrorType(err error) string {
+	name := "generic"
+	if errors.Is(err, context.Canceled) {
+		name = "canceled"
+	}
+	return name
 }

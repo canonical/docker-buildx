@@ -24,57 +24,70 @@ env:
   REPO_SLUG: "docker/buildx-bin"
   DESTDIR: "./bin"
   TEST_CACHE_SCOPE: "test"
+  TESTFLAGS: "-v --parallel=6 --timeout=30m"
+  GOTESTSUM_FORMAT: "standard-verbose"
+  GO_VERSION: "1.21"
+  GOTESTSUM_VERSION: "v1.9.0"  # same as one in Dockerfile
 
 jobs:
-  prepare-test:
+  test-integration:
     runs-on: ubuntu-22.04
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v4
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          version: ${{ env.BUILDX_VERSION }}
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-          buildkitd-flags: --debug
-      -
-        name: Build
-        uses: docker/bake-action@v4
-        with:
-          targets: integration-test-base
-          set: |
-            *.cache-from=type=gha,scope=${{ env.TEST_CACHE_SCOPE }}
-            *.cache-to=type=gha,scope=${{ env.TEST_CACHE_SCOPE }}
-
-  test:
-    runs-on: ubuntu-22.04
-    needs:
-      - prepare-test
     env:
-      TESTFLAGS: "-v --parallel=6 --timeout=30m"
       TESTFLAGS_DOCKER: "-v --parallel=1 --timeout=30m"
-      GOTESTSUM_FORMAT: "standard-verbose"
       TEST_IMAGE_BUILD: "0"
       TEST_IMAGE_ID: "buildx-tests"
     strategy:
       fail-fast: false
       matrix:
+        buildkit:
+          - master
+          - latest
+          - buildx-stable-1
+          - v0.13.1
+          - v0.12.5
+          - v0.11.6
         worker:
-          - docker
-          - docker\+containerd  # same as docker, but with containerd snapshotter
           - docker-container
           - remote
         pkg:
           - ./tests
+        mode:
+          - ""
+          - experimental
         include:
-          - pkg: ./...
-            skip-integration-tests: 1
+          - worker: docker
+            pkg: ./tests
+          - worker: docker+containerd  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+          - worker: docker
+            pkg: ./tests
+            mode: experimental
+          - worker: docker+containerd  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+            mode: experimental
     steps:
+      -
+        name: Prepare
+        run: |
+          echo "TESTREPORTS_NAME=${{ github.job }}-$(echo "${{ matrix.pkg }}-${{ matrix.buildkit }}-${{ matrix.worker }}-${{ matrix.mode }}" | tr -dc '[:alnum:]-\n\r' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          if [ -n "${{ matrix.buildkit }}" ]; then
+            echo "TEST_BUILDKIT_TAG=${{ matrix.buildkit }}" >> $GITHUB_ENV
+          fi
+          testFlags="--run=//worker=$(echo "${{ matrix.worker }}" | sed 's/\+/\\+/g')$"
+          case "${{ matrix.worker }}" in
+            docker | docker+containerd)
+              echo "TESTFLAGS=${{ env.TESTFLAGS_DOCKER }} $testFlags" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "TESTFLAGS=${{ env.TESTFLAGS }} $testFlags" >> $GITHUB_ENV
+              ;;
+          esac
+          if [[ "${{ matrix.worker }}" == "docker"* ]]; then
+            echo "TEST_DOCKERD=1" >> $GITHUB_ENV
+          fi
+          if [ "${{ matrix.mode }}" = "experimental" ]; then
+            echo "TEST_BUILDX_EXPERIMENTAL=1" >> $GITHUB_ENV
+          fi
       -
         name: Checkout
         uses: actions/checkout@v4
@@ -96,37 +109,107 @@ jobs:
         with:
           targets: integration-test
           set: |
-            *.cache-from=type=gha,scope=${{ env.TEST_CACHE_SCOPE }}
             *.output=type=docker,name=${{ env.TEST_IMAGE_ID }}
       -
         name: Test
         run: |
-          export TEST_REPORT_SUFFIX=-${{ github.job }}-$(echo "${{ matrix.pkg }}-${{ matrix.skip-integration-tests }}-${{ matrix.worker }}" | tr -dc '[:alnum:]-\n\r' | tr '[:upper:]' '[:lower:]')
           ./hack/test
         env:
-          TEST_DOCKERD: "${{ startsWith(matrix.worker, 'docker') && '1' || '0' }}"
-          TESTFLAGS: "${{ (matrix.worker == 'docker' || matrix.worker == 'docker\\+containerd') && env.TESTFLAGS_DOCKER || env.TESTFLAGS }} --run=//worker=${{ matrix.worker }}$"
+          TEST_REPORT_SUFFIX: "-${{ env.TESTREPORTS_NAME }}"
           TESTPKGS: "${{ matrix.pkg }}"
-          SKIP_INTEGRATION_TESTS: "${{ matrix.skip-integration-tests }}"
       -
         name: Send to Codecov
         if: always()
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           directory: ./bin/testreports
+          flags: integration
+          token: ${{ secrets.CODECOV_TOKEN }}
       -
         name: Generate annotations
         if: always()
-        uses: crazy-max/.github/.github/actions/gotest-annotations@1a64ea6d01db9a48aa61954cb20e265782c167d9
+        uses: crazy-max/.github/.github/actions/gotest-annotations@fa6141aedf23596fb8bdcceab9cce8dadaa31bd9
         with:
           directory: ./bin/testreports
       -
         name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: test-reports
+          name: test-reports-${{ env.TESTREPORTS_NAME }}
           path: ./bin/testreports
+
+  test-unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - macos-12
+          - windows-2022
+    env:
+      SKIP_INTEGRATION_TESTS: 1
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v4
+      -
+        name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+      -
+        name: Prepare
+        run: |
+          testreportsName=${{ github.job }}--${{ matrix.os }}
+          testreportsBaseDir=./bin/testreports
+          testreportsDir=$testreportsBaseDir/$testreportsName
+          echo "TESTREPORTS_NAME=$testreportsName" >> $GITHUB_ENV
+          echo "TESTREPORTS_BASEDIR=$testreportsBaseDir" >> $GITHUB_ENV
+          echo "TESTREPORTS_DIR=$testreportsDir" >> $GITHUB_ENV
+          mkdir -p $testreportsDir
+        shell: bash
+      -
+        name: Install gotestsum
+        run: |
+          go install gotest.tools/gotestsum@${{ env.GOTESTSUM_VERSION }}
+      -
+        name: Test
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          gotestsum \
+            --jsonfile="${{ env.TESTREPORTS_DIR }}/go-test-report.json" \
+            --junitfile="${{ env.TESTREPORTS_DIR }}/junit-report.xml" \
+            --packages="./..." \
+            -- \
+              "-mod=vendor" \
+              "-coverprofile" "${{ env.TESTREPORTS_DIR }}/coverage.txt" \
+              "-covermode" "atomic" ${{ env.TESTFLAGS }}
+        shell: bash
+      -
+        name: Send to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          directory: ${{ env.TESTREPORTS_DIR }}
+          env_vars: RUNNER_OS
+          flags: unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+      -
+        name: Generate annotations
+        if: always()
+        uses: crazy-max/.github/.github/actions/gotest-annotations@fa6141aedf23596fb8bdcceab9cce8dadaa31bd9
+        with:
+          directory: ${{ env.TESTREPORTS_DIR }}
+      -
+        name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ env.TESTREPORTS_NAME }}
+          path: ${{ env.TESTREPORTS_BASEDIR }}
 
   prepare-binaries:
     runs-on: ubuntu-22.04
@@ -183,16 +266,17 @@ jobs:
           CACHE_TO: type=gha,scope=binaries-${{ env.PLATFORM_PAIR }},mode=max
       -
         name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: buildx
+          name: buildx-${{ env.PLATFORM_PAIR }}
           path: ${{ env.DESTDIR }}/*
           if-no-files-found: error
 
   bin-image:
     runs-on: ubuntu-22.04
     needs:
-      - test
+      - test-integration
+      - test-unit
     if: ${{ github.event_name != 'pull_request' && github.repository == 'docker/buildx' }}
     steps:
       -
@@ -225,8 +309,8 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+          password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
       -
         name: Build and push image
         uses: docker/bake-action@v4
@@ -244,7 +328,8 @@ jobs:
   release:
     runs-on: ubuntu-22.04
     needs:
-      - test
+      - test-integration
+      - test-unit
       - binaries
     steps:
       -
@@ -252,10 +337,11 @@ jobs:
         uses: actions/checkout@v4
       -
         name: Download binaries
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: buildx
           path: ${{ env.DESTDIR }}
+          pattern: buildx-*
+          merge-multiple: true
       -
         name: Create checksums
         run: ./hack/hash-files
@@ -270,33 +356,9 @@ jobs:
       -
         name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v0.1.15
+        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564  # v2.0.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           draft: true
           files: ${{ env.DESTDIR }}/*
-
-  buildkit-edge:
-    runs-on: ubuntu-22.04
-    continue-on-error: true
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v4
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          version: ${{ env.BUILDX_VERSION }}
-          driver-opts: image=moby/buildkit:master
-          buildkitd-flags: --debug
-      -
-        # Just run a bake target to check eveything runs fine
-        name: Build
-        uses: docker/bake-action@v4
-        with:
-          targets: binaries

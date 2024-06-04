@@ -7,12 +7,14 @@ import (
 	"strings"
 
 	"github.com/docker/buildx/driver"
+	dockeropts "github.com/docker/cli/opts"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/pkg/errors"
 )
 
 const prioritySupported = 30
 const priorityUnsupported = 70
+const defaultRestartPolicy = "unless-stopped"
 
 func init() {
 	driver.Register(&factory{})
@@ -40,14 +42,19 @@ func (f *factory) New(ctx context.Context, cfg driver.InitConfig) (driver.Driver
 	if cfg.DockerAPI == nil {
 		return nil, errors.Errorf("%s driver requires docker API access", f.Name())
 	}
-	d := &Driver{factory: f, InitConfig: cfg}
+	rp, err := dockeropts.ParseRestartPolicy(defaultRestartPolicy)
+	if err != nil {
+		return nil, err
+	}
+	d := &Driver{
+		factory:       f,
+		InitConfig:    cfg,
+		restartPolicy: rp,
+	}
 	for k, v := range cfg.DriverOpts {
 		switch {
 		case k == "network":
 			d.netMode = v
-			if v == "host" {
-				d.InitConfig.BuildkitFlags = append(d.InitConfig.BuildkitFlags, "--allow-insecure-entitlement=network.host")
-			}
 		case k == "image":
 			d.image = v
 		case k == "memory":
@@ -82,6 +89,16 @@ func (f *factory) New(ctx context.Context, cfg driver.InitConfig) (driver.Driver
 			d.cpusetMems = v
 		case k == "cgroup-parent":
 			d.cgroupParent = v
+		case k == "restart-policy":
+			d.restartPolicy, err = dockeropts.ParseRestartPolicy(v)
+			if err != nil {
+				return nil, err
+			}
+		case k == "default-load":
+			d.defaultLoad, err = strconv.ParseBool(v)
+			if err != nil {
+				return nil, err
+			}
 		case strings.HasPrefix(k, "env."):
 			envName := strings.TrimPrefix(k, "env.")
 			if envName == "" {

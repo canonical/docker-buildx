@@ -29,6 +29,12 @@ jobs:
           - validate-generated-files
     steps:
       -
+        name: Prepare
+        run: |
+          if [ "$GITHUB_REPOSITORY" = "docker/buildx" ]; then
+            echo "GOLANGCI_LINT_MULTIPLATFORM=1" >> $GITHUB_ENV
+          fi
+      -
         name: Checkout
         uses: actions/checkout@v4
       -

@@ -99,7 +99,7 @@ func (d Display) UpdateFrom(ctx context.Context, ch chan *client.SolveStatus) ([
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, context.Cause(ctx)
 		case <-ticker.C:
 			d.disp.refresh()
 		case ss, ok := <-ch:
@@ -155,7 +155,7 @@ func NewDisplay(out io.Writer, mode DisplayMode, opts ...DisplayOpt) (Display, e
 	case PlainMode:
 		return newPlainDisplay(out, opts...), nil
 	case RawJSONMode:
-		return newRawJSONDisplay(out, opts...), nil
+		return newRawJSONDisplay(out), nil
 	case QuietMode:
 		return newDiscardDisplay(), nil
 	default:
@@ -283,7 +283,7 @@ type rawJSONDisplay struct {
 
 // newRawJSONDisplay creates a new Display that outputs an unbuffered
 // output of status update events.
-func newRawJSONDisplay(w io.Writer, opts ...DisplayOpt) Display {
+func newRawJSONDisplay(w io.Writer) Display {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return Display{
