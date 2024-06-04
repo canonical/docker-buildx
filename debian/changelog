@@ -1,4 +1,4 @@
-docker-buildx (0.14.1-0ubuntu1) UNRELEASED; urgency=medium
+docker-buildx (0.14.1-0ubuntu1) oracular; urgency=medium
 
   * New upstream release.
   * d/docker-buildx.docs: remove NOTICE file of a removed dependency.
