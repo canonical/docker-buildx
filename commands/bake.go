@@ -23,7 +23,6 @@ import (
 	"github.com/docker/buildx/util/tracing"
 	"github.com/docker/cli/cli/command"
 	"github.com/moby/buildkit/identity"
-	"github.com/moby/buildkit/util/appcontext"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -42,9 +41,7 @@ type bakeOptions struct {
 	exportLoad   bool
 }
 
-func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags commonFlags) (err error) {
-	ctx := appcontext.Context()
-
+func runBake(ctx context.Context, dockerCli command.Cli, targets []string, in bakeOptions, cFlags commonFlags) (err error) {
 	ctx, end, err := tracing.TraceCurrentCommand(ctx, "bake")
 	if err != nil {
 		return err
@@ -75,12 +72,10 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 
 	overrides := in.overrides
 	if in.exportPush {
-		if in.exportLoad {
-			return errors.Errorf("push and load may not be set together at the moment")
-		}
 		overrides = append(overrides, "*.push=true")
-	} else if in.exportLoad {
-		overrides = append(overrides, "*.output=type=docker")
+	}
+	if in.exportLoad {
+		overrides = append(overrides, "*.load=true")
 	}
 	if cFlags.noCache != nil {
 		overrides = append(overrides, fmt.Sprintf("*.no-cache=%t", *cFlags.noCache))
@@ -141,7 +136,7 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 			if err == nil {
 				err = err1
 			}
-			if err == nil && progressMode != progressui.QuietMode {
+			if err == nil && progressMode != progressui.QuietMode && progressMode != progressui.RawJSONMode {
 				desktop.PrintBuildDetails(os.Stderr, printer.BuildRefs(), term)
 			}
 		}
@@ -207,12 +202,12 @@ func runBake(dockerCli command.Cli, targets []string, in bakeOptions, cFlags com
 		return nil
 	}
 
-	// local state group
 	groupRef := identity.NewID()
 	var refs []string
 	for k, b := range bo {
 		b.Ref = identity.NewID()
 		b.GroupRef = groupRef
+		b.WithProvenanceResponse = len(in.metadataFile) > 0
 		refs = append(refs, b.Ref)
 		bo[k] = b
 	}
@@ -266,7 +261,7 @@ func bakeCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 			options.builder = rootOpts.builder
 			options.metadataFile = cFlags.metadataFile
 			// Other common flags (noCache, pull and progress) are processed in runBake function.
-			return runBake(dockerCli, args, options, cFlags)
+			return runBake(cmd.Context(), dockerCli, args, options, cFlags)
 		},
 		ValidArgsFunction: completion.BakeTargets(options.files),
 	}
@@ -295,13 +290,17 @@ func saveLocalStateGroup(dockerCli command.Cli, ref string, lsg localstate.State
 }
 
 func readBakeFiles(ctx context.Context, nodes []builder.Node, url string, names []string, stdin io.Reader, pw progress.Writer) (files []bake.File, inp *bake.Input, err error) {
-	var lnames []string
-	var rnames []string
+	var lnames []string // local
+	var rnames []string // remote
+	var anames []string // both
 	for _, v := range names {
 		if strings.HasPrefix(v, "cwd://") {
-			lnames = append(lnames, strings.TrimPrefix(v, "cwd://"))
+			tname := strings.TrimPrefix(v, "cwd://")
+			lnames = append(lnames, tname)
+			anames = append(anames, tname)
 		} else {
 			rnames = append(rnames, v)
+			anames = append(anames, v)
 		}
 	}
 
@@ -320,7 +319,7 @@ func readBakeFiles(ctx context.Context, nodes []builder.Node, url string, names 
 			if url != "" {
 				lfiles, err = bake.ReadLocalFiles(lnames, stdin, sub)
 			} else {
-				lfiles, err = bake.ReadLocalFiles(append(lnames, rnames...), stdin, sub)
+				lfiles, err = bake.ReadLocalFiles(anames, stdin, sub)
 			}
 			return nil
 		})

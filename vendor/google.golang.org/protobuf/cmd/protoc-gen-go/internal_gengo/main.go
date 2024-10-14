@@ -18,6 +18,7 @@ import (
 
 	"google.golang.org/protobuf/compiler/protogen"
 	"google.golang.org/protobuf/internal/encoding/tag"
+	"google.golang.org/protobuf/internal/filedesc"
 	"google.golang.org/protobuf/internal/genid"
 	"google.golang.org/protobuf/internal/version"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -288,7 +289,11 @@ func genEnum(g *protogen.GeneratedFile, f *fileInfo, e *enumInfo) {
 	genEnumReflectMethods(g, f, e)
 
 	// UnmarshalJSON method.
-	if e.genJSONMethod && e.Desc.Syntax() == protoreflect.Proto2 {
+	needsUnmarshalJSONMethod := e.genJSONMethod && e.Desc.Syntax() == protoreflect.Proto2
+	if fde, ok := e.Desc.(*filedesc.Enum); ok && fde.L1.EditionFeatures.GenerateLegacyUnmarshalJSON {
+		needsUnmarshalJSONMethod = true
+	}
+	if needsUnmarshalJSONMethod {
 		g.P("// Deprecated: Do not use.")
 		g.P("func (x *", e.GoIdent, ") UnmarshalJSON(b []byte) error {")
 		g.P("num, err := ", protoimplPackage.Ident("X"), ".UnmarshalJSONEnum(x.Descriptor(), b)")
@@ -614,7 +619,10 @@ func genMessageSetterMethods(g *protogen.GeneratedFile, f *fileInfo, m *messageI
 
 		genNoInterfacePragma(g, m.isTracked)
 
-		g.Annotate(m.GoIdent.GoName+".Set"+field.GoName, field.Location)
+		g.AnnotateSymbol(m.GoIdent.GoName+".Set"+field.GoName, protogen.Annotation{
+			Location: field.Location,
+			Semantic: descriptorpb.GeneratedCodeInfo_Annotation_SET.Enum(),
+		})
 		leadingComments := appendDeprecationSuffix("",
 			field.Desc.ParentFile(),
 			field.Desc.Options().(*descriptorpb.FieldOptions).GetDeprecated())
