@@ -17,7 +17,6 @@ import (
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/moby/buildkit/util/testutil/integration"
 	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,7 +56,7 @@ func testDialStdio(t *testing.T, sb integration.Sandbox) {
 			case <-time.After(10 * time.Second):
 				t.Error("timeout waiting for buildx command to exit")
 			case <-chErr:
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		}()
 
@@ -113,13 +112,10 @@ func testDialStdio(t *testing.T, sb integration.Sandbox) {
 		require.Equal(t, "world", string(dt))
 	}
 
-	t.Run("conn=netpipe", func(t *testing.T) {
-		t.Parallel()
-		do(t, func(t *testing.T, cmd *exec.Cmd) net.Conn {
-			c1, c2 := net.Pipe()
-			cmd.Stdin = c1
-			cmd.Stdout = c1
-			return c2
-		})
+	do(t, func(t *testing.T, cmd *exec.Cmd) net.Conn {
+		c1, c2 := net.Pipe()
+		cmd.Stdin = c1
+		cmd.Stdout = c1
+		return c2
 	})
 }

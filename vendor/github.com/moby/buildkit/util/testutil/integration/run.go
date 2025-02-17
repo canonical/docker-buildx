@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -12,15 +13,17 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/gofrs/flock"
 	"github.com/moby/buildkit/util/appcontext"
 	"github.com/moby/buildkit/util/contentutil"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/semaphore"
 )
@@ -36,6 +39,7 @@ type Backend interface {
 	Address() string
 	DockerAddress() string
 	ContainerdAddress() string
+	DebugAddress() string
 
 	Rootless() bool
 	NetNSDetached() bool
@@ -136,9 +140,7 @@ func WithMirroredImages(m map[string]string) TestOpt {
 		if tc.mirroredImages == nil {
 			tc.mirroredImages = map[string]string{}
 		}
-		for k, v := range m {
-			tc.mirroredImages[k] = v
-		}
+		maps.Copy(tc.mirroredImages, m)
 	}
 }
 
@@ -161,10 +163,7 @@ func Run(t *testing.T, testCases []Test, opt ...TestOpt) {
 		o(&tc)
 	}
 
-	mirror, cleanup, err := runMirror(t, tc.mirroredImages)
-	require.NoError(t, err)
-
-	t.Cleanup(func() { _ = cleanup() })
+	getMirror := lazyMirrorRunnerFunc(t, tc.mirroredImages)
 
 	matrix := prepareValueMatrix(tc)
 
@@ -191,13 +190,18 @@ func Run(t *testing.T, testCases []Test, opt ...TestOpt) {
 							t.Skip("rootless")
 						}
 						ctx := appcontext.Context()
-						if !strings.HasSuffix(fn, "NoParallel") {
+						// TODO(profnandaa): to revisit this to allow tests run
+						// in parallel on Windows in a stable way. Is flaky currently.
+						if !strings.HasSuffix(fn, "NoParallel") && runtime.GOOS != "windows" {
 							t.Parallel()
 						}
 						require.NoError(t, sandboxLimiter.Acquire(context.TODO(), 1))
 						defer sandboxLimiter.Release(1)
 
-						sb, closer, err := newSandbox(ctx, br, mirror, mv)
+						ctx, cancel := context.WithCancelCause(ctx)
+						defer func() { cancel(errors.WithStack(context.Canceled)) }()
+
+						sb, closer, err := newSandbox(ctx, t, br, getMirror(), mv)
 						require.NoError(t, err)
 						t.Cleanup(func() { _ = closer() })
 						defer func() {
@@ -235,6 +239,11 @@ func copyImagesLocal(t *testing.T, host string, images map[string]string) error 
 		}
 		localImageCache[host][to] = struct{}{}
 
+		// already exists check
+		if _, _, err := docker.NewResolver(docker.ResolverOptions{}).Resolve(context.TODO(), host+"/"+to); err == nil {
+			continue
+		}
+
 		var desc ocispecs.Descriptor
 		var provider content.Provider
 		var err error
@@ -254,12 +263,6 @@ func copyImagesLocal(t *testing.T, host string, images map[string]string) error 
 			}
 		}
 
-		// already exists check
-		_, _, err = docker.NewResolver(docker.ResolverOptions{}).Resolve(context.TODO(), host+"/"+to)
-		if err == nil {
-			continue
-		}
-
 		ingester, err := contentutil.IngesterFromRef(host + "/" + to)
 		if err != nil {
 			return err
@@ -273,23 +276,7 @@ func copyImagesLocal(t *testing.T, host string, images map[string]string) error 
 }
 
 func OfficialImages(names ...string) map[string]string {
-	ns := runtime.GOARCH
-	if ns == "arm64" {
-		ns = "arm64v8"
-	} else if ns != "amd64" {
-		ns = "library"
-	}
-	m := map[string]string{}
-	for _, name := range names {
-		ref := "docker.io/" + ns + "/" + name
-		if pns, ok := pins[name]; ok {
-			if dgst, ok := pns[ns]; ok {
-				ref += "@" + dgst
-			}
-		}
-		m["library/"+name] = ref
-	}
-	return m
+	return officialImages(names...)
 }
 
 func withMirrorConfig(mirror string) ConfigUpdater {
@@ -324,6 +311,20 @@ func WriteConfig(updaters []ConfigUpdater) (string, error) {
 		return "", err
 	}
 	return filepath.Join(tmpdir, buildkitdConfigFile), nil
+}
+
+func lazyMirrorRunnerFunc(t *testing.T, images map[string]string) func() string {
+	var once sync.Once
+	var mirror string
+	return func() string {
+		once.Do(func() {
+			host, cleanup, err := runMirror(t, images)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = cleanup() })
+			mirror = host
+		})
+		return mirror
+	}
 }
 
 func runMirror(t *testing.T, mirroredImages map[string]string) (host string, _ func() error, err error) {
@@ -414,9 +415,7 @@ func prepareValueMatrix(tc testConf) []matrixValue {
 			for _, c := range current {
 				vv := newMatrixValue(featureName, featureValue, v)
 				vv.fn = append(vv.fn, c.fn...)
-				for k, v := range c.values {
-					vv.values[k] = v
-				}
+				maps.Copy(vv.values, c.values)
 				m = append(m, vv)
 			}
 		}
@@ -427,9 +426,28 @@ func prepareValueMatrix(tc testConf) []matrixValue {
 	return m
 }
 
-// Skips tests on Windows
+// Skips tests on platform
 func SkipOnPlatform(t *testing.T, goos string) {
-	if runtime.GOOS == goos {
+	skip := false
+	// support for negation
+	if strings.HasPrefix(goos, "!") {
+		goos = strings.TrimPrefix(goos, "!")
+		skip = runtime.GOOS != goos
+	} else {
+		skip = runtime.GOOS == goos
+	}
+
+	if skip {
 		t.Skipf("Skipped on %s", goos)
 	}
+}
+
+// Selects between two types, returns second
+// argument if on Windows or else first argument.
+// Typically used for selecting test cases.
+func UnixOrWindows[T any](unix, windows T) T {
+	if runtime.GOOS == "windows" {
+		return windows
+	}
+	return unix
 }

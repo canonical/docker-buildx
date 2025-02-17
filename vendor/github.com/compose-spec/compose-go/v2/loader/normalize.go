@@ -18,6 +18,7 @@ package loader
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
@@ -26,18 +27,12 @@ import (
 
 // Normalize compose project by moving deprecated attributes to their canonical position and injecting implicit defaults
 func Normalize(dict map[string]any, env types.Mapping) (map[string]any, error) {
-	dict["networks"] = normalizeNetworks(dict)
+	normalizeNetworks(dict)
 
 	if d, ok := dict["services"]; ok {
 		services := d.(map[string]any)
 		for name, s := range services {
 			service := s.(map[string]any)
-			_, hasNetworks := service["networks"]
-			_, hasNetworkMode := service["network_mode"]
-			if !hasNetworks && !hasNetworkMode {
-				// Service without explicit network attachment are implicitly exposed on default network
-				service["networks"] = map[string]any{"default": nil}
-			}
 
 			if service["pull_policy"] == types.PullPolicyIfNotPresent {
 				service["pull_policy"] = types.PullPolicyMissing
@@ -58,14 +53,14 @@ func Normalize(dict map[string]any, env types.Mapping) (map[string]any, error) {
 				}
 
 				if a, ok := build["args"]; ok {
-					build["args"], _ = resolve(a, fn)
+					build["args"], _ = resolve(a, fn, false)
 				}
 
 				service["build"] = build
 			}
 
 			if e, ok := service["environment"]; ok {
-				service["environment"], _ = resolve(e, fn)
+				service["environment"], _ = resolve(e, fn, true)
 			}
 
 			var dependsOn map[string]any
@@ -108,6 +103,17 @@ func Normalize(dict map[string]any, env types.Mapping) (map[string]any, error) {
 				}
 			}
 
+			if v, ok := service["volumes"]; ok {
+				volumes := v.([]any)
+				for i, volume := range volumes {
+					vol := volume.(map[string]any)
+					target := vol["target"].(string)
+					vol["target"] = path.Clean(target)
+					volumes[i] = vol
+				}
+				service["volumes"] = volumes
+			}
+
 			if n, ok := service["volumes_from"]; ok {
 				volumesFrom := n.([]any)
 				for _, v := range volumesFrom {
@@ -129,34 +135,67 @@ func Normalize(dict map[string]any, env types.Mapping) (map[string]any, error) {
 			}
 			services[name] = service
 		}
+
 		dict["services"] = services
 	}
-
 	setNameFromKey(dict)
 
 	return dict, nil
 }
 
-func normalizeNetworks(dict map[string]any) map[string]any {
+func normalizeNetworks(dict map[string]any) {
 	var networks map[string]any
 	if n, ok := dict["networks"]; ok {
 		networks = n.(map[string]any)
 	} else {
 		networks = map[string]any{}
 	}
-	if _, ok := networks["default"]; !ok {
+
+	// implicit `default` network must be introduced only if actually used by some service
+	usesDefaultNetwork := false
+
+	if s, ok := dict["services"]; ok {
+		services := s.(map[string]any)
+		for name, se := range services {
+			service := se.(map[string]any)
+			if _, ok := service["network_mode"]; ok {
+				continue
+			}
+			if n, ok := service["networks"]; !ok {
+				// If none explicitly declared, service is connected to default network
+				service["networks"] = map[string]any{"default": nil}
+				usesDefaultNetwork = true
+			} else {
+				net := n.(map[string]any)
+				if len(net) == 0 {
+					// networks section declared but empty (corner case)
+					service["networks"] = map[string]any{"default": nil}
+					usesDefaultNetwork = true
+				} else if _, ok := net["default"]; ok {
+					usesDefaultNetwork = true
+				}
+			}
+			services[name] = service
+		}
+		dict["services"] = services
+	}
+
+	if _, ok := networks["default"]; !ok && usesDefaultNetwork {
 		// If not declared explicitly, Compose model involves an implicit "default" network
 		networks["default"] = nil
 	}
-	return networks
+
+	if len(networks) > 0 {
+		dict["networks"] = networks
+	}
 }
 
-func resolve(a any, fn func(s string) (string, bool)) (any, bool) {
+func resolve(a any, fn func(s string) (string, bool), keepEmpty bool) (any, bool) {
 	switch v := a.(type) {
 	case []any:
 		var resolved []any
 		for _, val := range v {
-			if r, ok := resolve(val, fn); ok {
+			if r, ok := resolve(val, fn, keepEmpty); ok {
 				resolved = append(resolved, r)
 			}
 		}
@@ -170,6 +209,8 @@ func resolve(a any, fn func(s string) (string, bool)) (any, bool) {
 			}
 			if s, ok := fn(key); ok {
 				resolved[key] = s
+			} else if keepEmpty {
+				resolved[key] = nil
 			}
 		}
 		return resolved, true
@@ -177,6 +218,9 @@ func resolve(a any, fn func(s string) (string, bool)) (any, bool) {
 		if !strings.Contains(v, "=") {
 			if val, ok := fn(v); ok {
 				return fmt.Sprintf("%s=%s", v, val), true
+			}
+			if keepEmpty {
+				return v, true
 			}
 			return "", false
 		}
