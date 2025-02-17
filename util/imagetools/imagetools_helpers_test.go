@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/v2/core/remotes"
 	intoto "github.com/in-toto/in-toto-golang/in_toto"
 	slsa02 "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v0.2"
 	"github.com/opencontainers/go-digest"
@@ -47,7 +47,6 @@ func (f mockFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.Rea
 		reader := io.NopCloser(strings.NewReader(desc.Annotations["test_content"]))
 		return reader, nil
 	}
-
 }
 
 func (r mockResolver) Resolve(ctx context.Context, ref string) (name string, desc ocispec.Descriptor, err error) {

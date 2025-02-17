@@ -5,9 +5,9 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/continuity/fs/fstest"
+	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/util/testutil/integration"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -78,6 +78,19 @@ func testImagetoolsCopyManifest(t *testing.T, sb integration.Sandbox) {
 	for i := range mfst.Layers {
 		require.Equal(t, mfst.Layers[i].Digest, mfst2.Layers[i].Digest)
 	}
+
+	cmd = buildxCmd(sb, withArgs("imagetools", "create", "--prefer-index=false", "-t", target2+"-not-index", target))
+	dt, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(dt))
+
+	cmd = buildxCmd(sb, withArgs("imagetools", "inspect", target2+"-not-index", "--raw"))
+	dt, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(dt))
+
+	var idx3 ocispecs.Manifest
+	err = json.Unmarshal(dt, &idx3)
+	require.NoError(t, err)
+	require.Equal(t, images.MediaTypeDockerSchema2Manifest, idx3.MediaType)
 }
 
 func testImagetoolsCopyIndex(t *testing.T, sb integration.Sandbox) {
@@ -126,6 +139,24 @@ func testImagetoolsCopyIndex(t *testing.T, sb integration.Sandbox) {
 	require.Equal(t, len(idx.Manifests), len(idx2.Manifests))
 	for i := range idx.Manifests {
 		require.Equal(t, idx.Manifests[i].Digest, idx2.Manifests[i].Digest)
+	}
+
+	cmd = buildxCmd(sb, withArgs("imagetools", "create", "--prefer-index=false", "-t", target2+"-still-index", target))
+	dt, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(dt))
+
+	cmd = buildxCmd(sb, withArgs("imagetools", "inspect", target2+"-still-index", "--raw"))
+	dt, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(dt))
+
+	var idx3 ocispecs.Index
+	err = json.Unmarshal(dt, &idx3)
+	require.NoError(t, err)
+	require.Equal(t, images.MediaTypeDockerSchema2ManifestList, idx3.MediaType)
+
+	require.Equal(t, len(idx.Manifests), len(idx3.Manifests))
+	for i := range idx.Manifests {
+		require.Equal(t, idx.Manifests[i].Digest, idx3.Manifests[i].Digest)
 	}
 }
 

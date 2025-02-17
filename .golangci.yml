@@ -1,49 +1,99 @@
 run:
   timeout: 30m
-  skip-files:
-    - ".*\\.pb\\.go$"
-
   modules-download-mode: vendor
-
-  build-tags:
+  # default uses Go version from the go.mod file, fallback on the env var
+  # `GOVERSION`, fallback on 1.17: https://golangci-lint.run/usage/configuration/#run-configuration
+  go: "1.23"
 
 linters:
   enable:
-    - gofmt
-    - govet
+    - bodyclose
     - depguard
+    - forbidigo
+    - gocritic
+    - gofmt
     - goimports
+    - gosec
+    - gosimple
+    - govet
     - ineffassign
+    - makezero
     - misspell
-    - unused
+    - noctx
+    - nolintlint
     - revive
     - staticcheck
+    - testifylint
     - typecheck
-    - nolintlint
-    - gosec
-    - forbidigo
+    - unused
+    - whitespace
   disable-all: true
 
 linters-settings:
+  gocritic:
+    disabled-checks:
+      - "ifElseChain"
+      - "assignOp"
+      - "appendAssign"
+      - "singleCaseSwitch"
+      - "exitAfterDefer" # FIXME
+  importas:
+    alias:
+      # Enforce alias to prevent it accidentally being used instead of
+      # buildkit errdefs package (or vice-versa).
+      - pkg: "github.com/containerd/errdefs"
+        alias: "cerrdefs"
+      - pkg: "github.com/opencontainers/image-spec/specs-go/v1"
+        alias: "ocispecs"
+      - pkg: "github.com/opencontainers/go-digest"
+        alias: "digest"
+  govet:
+    enable:
+      - nilness
+      - unusedwrite
+  # enable-all: true
+  # disable:
+  #   - fieldalignment
+  #   - shadow
   depguard:
     rules:
       main:
         deny:
-          # The io/ioutil package has been deprecated.
-          # https://go.dev/doc/go1.16#ioutil
+          - pkg: "github.com/containerd/containerd/errdefs"
+            desc: The containerd errdefs package was migrated to a separate module. Use github.com/containerd/errdefs instead.
+          - pkg: "github.com/containerd/containerd/log"
+            desc: The containerd log package was migrated to a separate module. Use github.com/containerd/log instead.
+          - pkg: "github.com/containerd/containerd/platforms"
+            desc: The containerd platforms package was migrated to a separate module. Use github.com/containerd/platforms instead.
           - pkg: "io/ioutil"
             desc: The io/ioutil package has been deprecated.
   forbidigo:
     forbid:
+      - '^context\.WithCancel(# use context\.WithCancelCause instead)?$'
+      - '^context\.WithDeadline(# use context\.WithDeadline instead)?$'
+      - '^context\.WithTimeout(# use context\.WithTimeoutCause instead)?$'
+      - '^ctx\.Err(# use context\.Cause instead)?$'
       - '^fmt\.Errorf(# use errors\.Errorf instead)?$'
+      - '^platforms\.DefaultString(# use platforms\.Format(platforms\.DefaultSpec()) instead\.)?$'
   gosec:
     excludes:
       - G204  # Audit use of command execution
       - G402  # TLS MinVersion too low
+      - G115  # integer overflow conversion (TODO: verify these)
     config:
       G306: "0644"
+  testifylint:
+    disable:
+      # disable rules that reduce the test condition
+      - "empty"
+      - "bool-compare"
+      - "len"
+      - "negative-positive"
+
 
 issues:
+  exclude-files:
+    - ".*\\.pb\\.go$"
   exclude-rules:
     - linters:
         - revive
@@ -64,6 +114,6 @@ issues:
         - revive
       text: "if-return"
 
-# show all
-max-issues-per-linter: 0
-max-same-issues: 0
+  # show all
+  max-issues-per-linter: 0
+  max-same-issues: 0

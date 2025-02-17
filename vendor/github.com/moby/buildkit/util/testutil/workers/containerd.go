@@ -135,11 +135,12 @@ func (c *Containerd) New(ctx context.Context, cfg *integration.BackendConfig) (b
 	deferF.Append(func() error { return os.RemoveAll(tmpdir) })
 
 	address := getContainerdSock(tmpdir)
-	config := fmt.Sprintf(`root = %q
+	config := fmt.Sprintf(`version = 2
+root = %q
 state = %q
 # CRI plugins listens on 10010/tcp for stream server.
 # We disable CRI plugin so that multiple instance can run simultaneously.
-disabled_plugins = ["cri"]
+disabled_plugins = ["io.containerd.grpc.v1.cri"]
 
 [grpc]
   address = %q
@@ -231,7 +232,7 @@ disabled_plugins = ["cri"]
 			"nsenter", "-U", "--preserve-credentials", "-m", "-t", fmt.Sprintf("%d", pid)},
 			append(buildkitdArgs, "--containerd-worker-snapshotter=native")...)
 	}
-	buildkitdSock, stop, err := runBuildkitd(cfg, buildkitdArgs, cfg.Logs, c.UID, c.GID, c.ExtraEnv)
+	buildkitdSock, debugSock, stop, err := runBuildkitd(cfg, buildkitdArgs, cfg.Logs, c.UID, c.GID, c.ExtraEnv)
 	if err != nil {
 		integration.PrintLogs(cfg.Logs, log.Println)
 		return nil, nil, err
@@ -241,6 +242,7 @@ disabled_plugins = ["cri"]
 	return backend{
 		address:           buildkitdSock,
 		containerdAddress: address,
+		debugAddress:      debugSock,
 		rootless:          rootless,
 		netnsDetached:     false,
 		snapshotter:       c.Snapshotter,

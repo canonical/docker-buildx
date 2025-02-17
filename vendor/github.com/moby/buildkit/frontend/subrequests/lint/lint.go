@@ -16,6 +16,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+type SourceInfoMap func(*pb.SourceInfo) *pb.SourceInfo
+
 const RequestLint = "frontend.lint"
 
 var SubrequestLintDefinition = subrequests.Request{
@@ -32,16 +34,43 @@ var SubrequestLintDefinition = subrequests.Request{
 }
 
 type Warning struct {
-	RuleName    string      `json:"ruleName"`
-	Description string      `json:"description,omitempty"`
-	URL         string      `json:"url,omitempty"`
-	Detail      string      `json:"detail,omitempty"`
-	Location    pb.Location `json:"location,omitempty"`
+	RuleName    string       `json:"ruleName"`
+	Description string       `json:"description,omitempty"`
+	URL         string       `json:"url,omitempty"`
+	Detail      string       `json:"detail,omitempty"`
+	Location    *pb.Location `json:"location,omitempty"`
+}
+
+func (w *Warning) PrintTo(wr io.Writer, sources []*pb.SourceInfo, scb SourceInfoMap) error {
+	fmt.Fprintf(wr, "\nWARNING: %s", w.RuleName)
+	if w.URL != "" {
+		fmt.Fprintf(wr, " - %s", w.URL)
+	}
+	fmt.Fprintf(wr, "\n%s\n", w.Detail)
+
+	if w.Location.SourceIndex < 0 {
+		return nil
+	}
+	sourceInfo := sources[w.Location.SourceIndex]
+	if scb != nil {
+		sourceInfo = scb(sourceInfo)
+	}
+	source := errdefs.Source{
+		Info:   sourceInfo,
+		Ranges: w.Location.Ranges,
+	}
+	return source.Print(wr)
+}
+
+type BuildError struct {
+	Message  string      `json:"message"`
+	Location pb.Location `json:"location"`
 }
 
 type LintResults struct {
 	Warnings []Warning        `json:"warnings"`
 	Sources  []*pb.SourceInfo `json:"sources"`
+	Error    *BuildError      `json:"buildError,omitempty"`
 }
 
 func (results *LintResults) AddSource(sourceMap *llb.SourceMap) int {
@@ -64,17 +93,17 @@ func (results *LintResults) AddWarning(rulename, description, url, fmtmsg string
 	sourceLocation := []*pb.Range{}
 	for _, loc := range location {
 		sourceLocation = append(sourceLocation, &pb.Range{
-			Start: pb.Position{
+			Start: &pb.Position{
 				Line:      int32(loc.Start.Line),
 				Character: int32(loc.Start.Character),
 			},
-			End: pb.Position{
+			End: &pb.Position{
 				Line:      int32(loc.End.Line),
 				Character: int32(loc.End.Character),
 			},
 		})
 	}
-	pbLocation := pb.Location{
+	pbLocation := &pb.Location{
 		SourceIndex: int32(sourceIndex),
 		Ranges:      sourceLocation,
 	}
@@ -87,7 +116,7 @@ func (results *LintResults) AddWarning(rulename, description, url, fmtmsg string
 	})
 }
 
-func (results *LintResults) ToResult() (*client.Result, error) {
+func (results *LintResults) ToResult(scb SourceInfoMap) (*client.Result, error) {
 	res := client.NewResult()
 	dt, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
@@ -96,13 +125,13 @@ func (results *LintResults) ToResult() (*client.Result, error) {
 	res.AddMeta("result.json", dt)
 
 	b := bytes.NewBuffer(nil)
-	if err := PrintLintViolations(dt, b); err != nil {
+	if err := PrintLintViolations(dt, b, scb); err != nil {
 		return nil, err
 	}
 	res.AddMeta("result.txt", b.Bytes())
 
 	status := 0
-	if len(results.Warnings) > 0 {
+	if len(results.Warnings) > 0 || results.Error != nil {
 		status = 1
 	}
 	res.AddMeta("result.statuscode", []byte(fmt.Sprintf("%d", status)))
@@ -111,28 +140,7 @@ func (results *LintResults) ToResult() (*client.Result, error) {
 	return res, nil
 }
 
-func (results *LintResults) validateWarnings() error {
-	for _, warning := range results.Warnings {
-		if int(warning.Location.SourceIndex) >= len(results.Sources) {
-			return errors.Errorf("sourceIndex is out of range")
-		}
-		if warning.Location.SourceIndex > 0 {
-			warningSource := results.Sources[warning.Location.SourceIndex]
-			if warningSource == nil {
-				return errors.Errorf("sourceIndex points to nil source")
-			}
-		}
-	}
-	return nil
-}
-
-func PrintLintViolations(dt []byte, w io.Writer) error {
-	var results LintResults
-
-	if err := json.Unmarshal(dt, &results); err != nil {
-		return err
-	}
-
+func (results *LintResults) PrintTo(w io.Writer, scb SourceInfoMap) error {
 	if err := results.validateWarnings(); err != nil {
 		return err
 	}
@@ -163,24 +171,57 @@ func PrintLintViolations(dt []byte, w io.Writer) error {
 	})
 
 	for _, warning := range results.Warnings {
-		fmt.Fprintf(w, "\n- %s\n%s\n", warning.Detail, warning.Description)
-		if warning.URL != "" {
-			fmt.Fprintf(w, "URL: %s\n", warning.URL)
-		}
-		if warning.Location.SourceIndex < 0 {
-			continue
-		}
-		sourceInfo := results.Sources[warning.Location.SourceIndex]
-		source := errdefs.Source{
-			Info:   sourceInfo,
-			Ranges: warning.Location.Ranges,
-		}
-		err := source.Print(w)
+		err := warning.PrintTo(w, results.Sources, scb)
 		if err != nil {
 			return err
 		}
 	}
+
 	return nil
+}
+
+func (results *LintResults) PrintErrorTo(w io.Writer, scb SourceInfoMap) {
+	// This prints out the error in LintResults to the writer in a format that
+	// is consistent with the warnings for easier downstream consumption.
+	if results.Error == nil {
+		return
+	}
+
+	fmt.Fprintln(w, results.Error.Message)
+	sourceInfo := results.Sources[results.Error.Location.SourceIndex]
+	if scb != nil {
+		sourceInfo = scb(sourceInfo)
+	}
+	source := errdefs.Source{
+		Info:   sourceInfo,
+		Ranges: results.Error.Location.Ranges,
+	}
+	source.Print(w)
+}
+
+func (results *LintResults) validateWarnings() error {
+	for _, warning := range results.Warnings {
+		if int(warning.Location.SourceIndex) >= len(results.Sources) {
+			return errors.Errorf("sourceIndex is out of range")
+		}
+		if warning.Location.SourceIndex > 0 {
+			warningSource := results.Sources[warning.Location.SourceIndex]
+			if warningSource == nil {
+				return errors.Errorf("sourceIndex points to nil source")
+			}
+		}
+	}
+	return nil
+}
+
+func PrintLintViolations(dt []byte, w io.Writer, scb SourceInfoMap) error {
+	var results LintResults
+
+	if err := json.Unmarshal(dt, &results); err != nil {
+		return err
+	}
+
+	return results.PrintTo(w, scb)
 }
 
 func sourceInfoEqual(a, b *pb.SourceInfo) bool {

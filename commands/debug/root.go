@@ -64,7 +64,7 @@ func RootCmd(dockerCli command.Cli, children ...DebuggableCmd) *cobra.Command {
 				return errors.Errorf("failed to configure terminal: %v", err)
 			}
 
-			_, err = monitor.RunMonitor(ctx, "", nil, controllerapi.InvokeConfig{
+			_, err = monitor.RunMonitor(ctx, "", nil, &controllerapi.InvokeConfig{
 				Tty: true,
 			}, c, dockerCli.In(), os.Stdout, os.Stderr, printer)
 			con.Reset()
@@ -80,7 +80,7 @@ func RootCmd(dockerCli command.Cli, children ...DebuggableCmd) *cobra.Command {
 	flags.StringVar(&controlOptions.Root, "root", "", "Specify root directory of server to connect for the monitor")
 	flags.BoolVar(&controlOptions.Detach, "detach", runtime.GOOS == "linux", "Detach buildx server for the monitor (supported only on linux)")
 	flags.StringVar(&controlOptions.ServerConfig, "server-config", "", "Specify buildx server config file for the monitor (used only when launching new server)")
-	flags.StringVar(&progressMode, "progress", "auto", `Set type of progress output ("auto", "plain", "tty") for the monitor. Use plain to show container output`)
+	flags.StringVar(&progressMode, "progress", "auto", `Set type of progress output ("auto", "plain", "tty", "rawjson") for the monitor. Use plain to show container output`)
 
 	cobrautil.MarkFlagsExperimental(flags, "invoke", "on", "root", "detach", "server-config")
 
