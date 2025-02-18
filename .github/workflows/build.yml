@@ -120,7 +120,7 @@ jobs:
       -
         name: Send to Codecov
         if: always()
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           directory: ./bin/testreports
           flags: integration
@@ -191,7 +191,7 @@ jobs:
       -
         name: Send to Codecov
         if: always()
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           directory: ${{ env.TESTREPORTS_DIR }}
           env_vars: RUNNER_OS
