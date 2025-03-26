@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 package workers
 
@@ -33,6 +32,10 @@ func getSysProcAttr() *syscall.SysProcAttr {
 
 func getBuildkitdAddr(tmpdir string) string {
 	return "unix://" + filepath.Join(tmpdir, "buildkitd.sock")
+}
+
+func getBuildkitdDebugAddr(tmpdir string) string {
+	return "unix://" + filepath.Join(tmpdir, "buildkitd-debug.sock")
 }
 
 func getTraceSocketPath(tmpdir string) string {

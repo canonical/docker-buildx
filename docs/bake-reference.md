@@ -1,4 +1,6 @@
-# Bake file reference
+---
+title: Bake file reference
+---
 
 The Bake file is a file for defining workflows that you run using `docker buildx bake`.
 
@@ -17,8 +19,8 @@ By default, Bake uses the following lookup order to find the configuration file:
 3. `docker-compose.yml`
 4. `docker-compose.yaml`
 5. `docker-bake.json`
-6. `docker-bake.override.json`
-7. `docker-bake.hcl`
+6. `docker-bake.hcl`
+7. `docker-bake.override.json`
 8. `docker-bake.override.hcl`
 
 You can specify the file location explicitly using the `--file` flag:
@@ -219,8 +221,10 @@ The following table shows the complete list of attributes that you can assign to
 | [`attest`](#targetattest)                       | List    | Build attestations                                                   |
 | [`cache-from`](#targetcache-from)               | List    | External cache sources                                               |
 | [`cache-to`](#targetcache-to)                   | List    | External cache destinations                                          |
+| [`call`](#targetcall)                           | String  | Specify the frontend method to call for the target.                  |
 | [`context`](#targetcontext)                     | String  | Set of files located in the specified path or URL                    |
 | [`contexts`](#targetcontexts)                   | Map     | Additional build contexts                                            |
+| [`description`](#targetdescription)             | String  | Description of a target                                              |
 | [`dockerfile-inline`](#targetdockerfile-inline) | String  | Inline Dockerfile string                                             |
 | [`dockerfile`](#targetdockerfile)               | String  | Dockerfile location                                                  |
 | [`inherits`](#targetinherits)                   | List    | Inherit attributes from other targets                                |
@@ -357,6 +361,28 @@ target "app" {
 }
 ```
 
+### `target.call`
+
+Specifies the frontend method to use. Frontend methods let you, for example,
+execute build checks only, instead of running a build. This is the same as the
+`--call` flag.
+
+```hcl
+target "app" {
+  call = "check"
+}
+```
+
+Supported values are:
+
+- `build` builds the target (default)
+- `check`: evaluates [build checks](https://docs.docker.com/build/checks/) for the target
+- `outline`: displays the target's build arguments and their default values if available
+- `targets`: lists all Bake targets in the loaded definition, along with its [description](#targetdescription).
+
+For more information about frontend methods, refer to the CLI reference for
+[`docker buildx build --call`](https://docs.docker.com/reference/cli/docker/buildx/build/#call).
+
 ### `target.context`
 
 Specifies the location of the build context to use for this target.
@@ -441,8 +467,7 @@ COPY --from=src . .
 
 #### Use another target as base
 
-> **Note**
->
+> [!NOTE]
 > You should prefer to use regular multi-stage builds over this option. You can
 > Use this feature when you have multiple Dockerfiles that can't be easily
 > merged into one.
@@ -464,6 +489,25 @@ target "app" {
 FROM baseapp
 RUN echo "Hello world"
 ```
+
+### `target.description`
+
+Defines a human-readable description for the target, clarifying its purpose or
+functionality.
+
+```hcl
+target "lint" {
+    description = "Runs golangci-lint to detect style errors"
+    args = {
+        GOLANGCI_LINT_VERSION = null
+    }
+    dockerfile = "lint.Dockerfile"
+}
+```
+
+This attribute is useful when combined with the `docker buildx bake --list=targets`
+option, providing a more informative output when listing the available build
+targets in a Bake file.
 
 ### `target.dockerfile-inline`
 
@@ -503,6 +547,25 @@ $ docker buildx bake --print -f - <<< 'target "default" {}'
   }
 }
 ```
+
+### `target.entitlements`
+
+Entitlements are permissions that the build process requires to run.
+
+Currently supported entitlements are:
+
+- `network.host`: Allows the build to use commands that access the host network. In Dockerfile, use [`RUN --network=host`](https://docs.docker.com/reference/dockerfile/#run---networkhost) to run a command with host network enabled.
+
+- `security.insecure`: Allows the build to run commands in privileged containers that are not limited by the default security sandbox. Such container may potentially access and modify system resources. In Dockerfile, use [`RUN --security=insecure`](https://docs.docker.com/reference/dockerfile/#run---security) to run a command in a privileged container.
+
+```hcl
+target "integration-tests" {
+  # this target requires privileged containers to run nested containers
+  entitlements = ["security.insecure"]
+}
+```
+
+Entitlements are enabled with a two-step process. First, a target must declare the entitlements it requires. Secondly, when invoking the `bake` command, the user must grant the entitlements by passing the `--allow` flag or confirming the entitlements when prompted in an interactive terminal. This is to ensure that the user is aware of the possibly insecure permissions they are granting to the build process.
 
 ### `target.inherits`
 
@@ -748,6 +811,27 @@ target "app" {
 }
 ```
 
+### `target.network`
+
+Specify the network mode for the whole build request. This will override the default network mode
+for all the `RUN` instructions in the Dockerfile. Accepted values are `default`, `host`, and `none`.
+
+Usually, a better approach to set the network mode for your build steps is to instead use `RUN --network=<value>`
+in your Dockerfile. This way, you can set the network mode for individual build steps and everyone building
+the Dockerfile gets consistent behavior without needing to pass additional flags to the build command.
+
+If you set network mode to `host` in your Bake file, you must also grant `network.host` entitlement when
+invoking the `bake` command. This is because `host` network mode requires elevated privileges and can be a security risk.
+You can pass `--allow=network.host` to the `docker buildx bake` command to grant the entitlement, or you can
+confirm the entitlement when prompted if you are using an interactive terminal.
+
+```hcl
+target "app" {
+  # make sure this build does not access internet
+  network = "none"
+}
+```
+
 ### `target.no-cache-filter`
 
 Don't use build cache for the specified stages.
@@ -803,7 +887,7 @@ The following example forces the builder to always pull all images referenced in
 
 ```hcl
 target "default" {
-  pull = "always"
+  pull = true
 }
 ```
 
@@ -830,8 +914,8 @@ This lets you [mount the secret][run_mount_secret] in your Dockerfile.
 ```dockerfile
 RUN --mount=type=secret,id=aws,target=/root/.aws/credentials \
     aws cloudfront create-invalidation ...
-RUN --mount=type=secret,id=KUBECONFIG \
-    KUBECONFIG=$(cat /run/secrets/KUBECONFIG) helm upgrade --install
+RUN --mount=type=secret,id=KUBECONFIG,env=KUBECONFIG \
+    helm upgrade --install
 ```
 
 ### `target.shm-size`
@@ -851,8 +935,7 @@ target "default" {
 }
 ```
 
-> **Note**
->
+> [!NOTE]
 > In most cases, it is recommended to let the builder automatically determine
 > the appropriate configurations. Manual adjustments should only be considered
 > when specific performance tuning is required for complex build scenarios.
@@ -917,14 +1000,12 @@ target "app" {
 }
 ```
 
-> **Note**
->
+> [!NOTE]
 > If you do not provide a `hard limit`, the `soft limit` is used
 > for both values. If no `ulimits` are set, they are inherited from
 > the default `ulimits` set on the daemon.
 
-> **Note**
->
+> [!NOTE]
 > In most cases, it is recommended to let the builder automatically determine
 > the appropriate configurations. Manual adjustments should only be considered
 > when specific performance tuning is required for complex build scenarios.
@@ -1112,8 +1193,7 @@ target "webapp-dev" {
 }
 ```
 
-> **Note**
->
+> [!NOTE]
 > See [User defined HCL functions][hcl-funcs] page for more details.
 
 <!-- external links -->

@@ -13,20 +13,25 @@ Build from a file
 
 ### Options
 
-| Name                                | Type          | Default | Description                                                                              |
-|:------------------------------------|:--------------|:--------|:-----------------------------------------------------------------------------------------|
-| [`--builder`](#builder)             | `string`      |         | Override the configured builder instance                                                 |
-| [`-f`](#file), [`--file`](#file)    | `stringArray` |         | Build definition file                                                                    |
-| `--load`                            |               |         | Shorthand for `--set=*.output=type=docker`                                               |
-| [`--metadata-file`](#metadata-file) | `string`      |         | Write build result metadata to a file                                                    |
-| [`--no-cache`](#no-cache)           |               |         | Do not use cache when building the image                                                 |
-| [`--print`](#print)                 |               |         | Print the options without building                                                       |
-| [`--progress`](#progress)           | `string`      | `auto`  | Set type of progress output (`auto`, `plain`, `tty`). Use plain to show container output |
-| [`--provenance`](#provenance)       | `string`      |         | Shorthand for `--set=*.attest=type=provenance`                                           |
-| [`--pull`](#pull)                   |               |         | Always attempt to pull all referenced images                                             |
-| `--push`                            |               |         | Shorthand for `--set=*.output=type=registry`                                             |
-| [`--sbom`](#sbom)                   | `string`      |         | Shorthand for `--set=*.attest=type=sbom`                                                 |
-| [`--set`](#set)                     | `stringArray` |         | Override target value (e.g., `targetpattern.key=value`)                                  |
+| Name                                | Type          | Default | Description                                                                                                  |
+|:------------------------------------|:--------------|:--------|:-------------------------------------------------------------------------------------------------------------|
+| [`--allow`](#allow)                 | `stringArray` |         | Allow build to access specified resources                                                                    |
+| [`--builder`](#builder)             | `string`      |         | Override the configured builder instance                                                                     |
+| [`--call`](#call)                   | `string`      | `build` | Set method for evaluating build (`check`, `outline`, `targets`)                                              |
+| [`--check`](#check)                 | `bool`        |         | Shorthand for `--call=check`                                                                                 |
+| `-D`, `--debug`                     | `bool`        |         | Enable debug logging                                                                                         |
+| [`-f`](#file), [`--file`](#file)    | `stringArray` |         | Build definition file                                                                                        |
+| [`--list`](#list)                   | `string`      |         | List targets or variables                                                                                    |
+| `--load`                            | `bool`        |         | Shorthand for `--set=*.output=type=docker`                                                                   |
+| [`--metadata-file`](#metadata-file) | `string`      |         | Write build result metadata to a file                                                                        |
+| [`--no-cache`](#no-cache)           | `bool`        |         | Do not use cache when building the image                                                                     |
+| [`--print`](#print)                 | `bool`        |         | Print the options without building                                                                           |
+| [`--progress`](#progress)           | `string`      | `auto`  | Set type of progress output (`auto`, `quiet`, `plain`, `tty`, `rawjson`). Use plain to show container output |
+| [`--provenance`](#provenance)       | `string`      |         | Shorthand for `--set=*.attest=type=provenance`                                                               |
+| [`--pull`](#pull)                   | `bool`        |         | Always attempt to pull all referenced images                                                                 |
+| `--push`                            | `bool`        |         | Shorthand for `--set=*.output=type=registry`                                                                 |
+| [`--sbom`](#sbom)                   | `string`      |         | Shorthand for `--set=*.attest=type=sbom`                                                                     |
+| [`--set`](#set)                     | `stringArray` |         | Override target value (e.g., `targetpattern.key=value`)                                                      |
 
 
 <!---MARKER_GEN_END-->
@@ -39,17 +44,98 @@ as part of the build.
 Read [High-level build options with Bake](https://docs.docker.com/build/bake/)
 guide for introduction to writing bake files.
 
-> **Note**
->
+> [!NOTE]
 > `buildx bake` command may receive backwards incompatible features in the future
 > if needed. We are looking for feedback on improving the command and extending
 > the functionality further.
 
 ## Examples
 
+### <a name="allow"></a> Allow extra privileged entitlement (--allow)
+
+```text
+--allow=ENTITLEMENT[=VALUE]
+```
+
+Entitlements are designed to provide controlled access to privileged
+operations. By default, Buildx and BuildKit operates with restricted
+permissions to protect users and their systems from unintended side effects or
+security risks. The `--allow` flag explicitly grants access to additional
+entitlements, making it clear when a build or bake operation requires elevated
+privileges.
+
+In addition to BuildKit's `network.host` and `security.insecure` entitlements
+(see [`docker buildx build --allow`](https://docs.docker.com/reference/cli/docker/buildx/build/#allow),
+Bake supports file system entitlements that grant granular control over file
+system access. These are particularly useful when working with builds that need
+access to files outside the default working directory.
+
+Bake supports the following filesystem entitlements:
+
+- `--allow fs=<path|*>` - Grant read and write access to files outside of the
+  working directory.
+- `--allow fs.read=<path|*>` - Grant read access to files outside of the
+  working directory.
+- `--allow fs.write=<path|*>` - Grant write access to files outside of the
+  working directory.
+
+The `fs` entitlements take a path value (relative or absolute) to a directory
+on the filesystem. Alternatively, you can pass a wildcard (`*`) to allow Bake
+to access the entire filesystem.
+
+### Example: fs.read
+
+Given the following Bake configuration, Bake would need to access the parent
+directory, relative to the Bake file.
+
+```hcl
+target "app" {
+  context = "../src"
+}
+```
+
+Assuming `docker buildx bake app` is executed in the same directory as the
+`docker-bake.hcl` file, you would need to explicitly allow Bake to read from
+the `../src` directory. In this case, the following invocations all work:
+
+```console
+$ docker buildx bake --allow fs.read=* app
+$ docker buildx bake --allow fs.read=../src app
+$ docker buildx bake --allow fs=* app
+```
+
+### Example: fs.write
+
+The following `docker-bake.hcl` file requires write access to the `/tmp`
+directory.
+
+```hcl
+target "app" {
+  output = "/tmp"
+}
+```
+
+Assuming `docker buildx bake app` is executed outside of the `/tmp` directory,
+you would need to allow the `fs.write` entitlement, either by specifying the
+path or using a wildcard:
+
+```console
+$ docker buildx bake --allow fs=/tmp app
+$ docker buildx bake --allow fs.write=/tmp app
+$ docker buildx bake --allow fs.write=* app
+```
+
 ### <a name="builder"></a> Override the configured builder instance (--builder)
 
 Same as [`buildx --builder`](buildx.md#builder).
+
+### <a name="call"></a> Invoke a frontend method (--call)
+
+Same as [`build --call`](buildx_build.md#call).
+
+#### <a name="check"></a> Call: check (--check)
+
+Same as [`build --check`](buildx_build.md#check).
 
 ### <a name="file"></a> Specify a build definition file (-f, --file)
 
@@ -90,6 +176,42 @@ $ docker buildx bake -f docker-bake.dev.hcl db webapp-release
 See the [Bake file reference](https://docs.docker.com/build/bake/reference/)
 for more details.
 
+### <a name="list"></a> List targets and variables (--list)
+
+The `--list` flag displays all available targets or variables in the Bake
+configuration, along with a description (if set using the `description`
+property in the Bake file).
+
+To list all targets:
+
+```console {title="List targets"}
+$ docker buildx bake --list=targets
+TARGET              DESCRIPTION
+binaries
+default             binaries
+update-docs
+validate
+validate-golangci   Validate .golangci.yml schema (does not run Go linter)
+```
+
+To list variables:
+
+```console
+$ docker buildx bake --list=variables
+VARIABLE      VALUE                DESCRIPTION
+REGISTRY      docker.io/username   Registry and namespace
+IMAGE_NAME    my-app               Image name
+GO_VERSION    <null>
+```
+
+By default, the output of `docker buildx bake --list` is presented in a table
+format. Alternatively, you can use a long-form CSV syntax and specify a
+`format` attribute to output the list in JSON.
+
+```console
+$ docker buildx bake --list=type=targets,format=json
+```
+
 ### <a name="metadata-file"></a> Write build results metadata to a file (--metadata-file)
 
 Similar to [`buildx build --metadata-file`](buildx_build.md#metadata-file) but
@@ -119,6 +241,7 @@ $ cat metadata.json
 
 ```json
 {
+  "buildx.build.warnings": {},
   "db": {
     "buildx.build.provenance": {},
     "buildx.build.ref": "mybuilder/mybuilder0/0fjb6ubs52xx3vygf6fgdl611",
@@ -152,14 +275,18 @@ $ cat metadata.json
 }
 ```
 
-> **Note**
->
-> Build record [provenance](https://docs.docker.com/build/attestations/slsa-provenance/#provenance-attestation-example)
+> [!NOTE]
+> Build record [provenance](https://docs.docker.com/build/metadata/attestations/slsa-provenance/#provenance-attestation-example)
 > (`buildx.build.provenance`) includes minimal provenance by default. Set the
 > `BUILDX_METADATA_PROVENANCE` environment variable to customize this behavior:
 > * `min` sets minimal provenance (default).
 > * `max` sets full provenance.
 > * `disabled`, `false` or `0` does not set any provenance.
+
+> [!NOTE]
+> Build warnings (`buildx.build.warnings`) are not included by default. Set the
+> `BUILDX_METADATA_WARNINGS` environment variable to `1` or `true` to
+> include them.
 
 ### <a name="no-cache"></a> Don't use cache when building the image (--no-cache)
 
