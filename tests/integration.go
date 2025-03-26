@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,7 +57,7 @@ func buildxCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
 
 	if builder := sb.Address(); builder != "" {
 		cmd.Env = append(cmd.Env,
-			"BUILDX_CONFIG=/tmp/buildx-"+builder,
+			"BUILDX_CONFIG="+buildxConfig(sb),
 			"BUILDX_BUILDER="+builder,
 		)
 	}
@@ -65,6 +66,10 @@ func buildxCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
 	}
 	if isExperimental() {
 		cmd.Env = append(cmd.Env, "BUILDX_EXPERIMENTAL=1")
+	}
+	if v := os.Getenv("GO_TEST_COVERPROFILE"); v != "" {
+		coverDir := filepath.Join(filepath.Dir(v), "helpers")
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+coverDir)
 	}
 
 	return cmd
@@ -82,34 +87,45 @@ func dockerCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
 	return cmd
 }
 
+func buildxConfig(sb integration.Sandbox) string {
+	if builder := sb.Address(); builder != "" {
+		return "/tmp/buildx-" + builder
+	}
+	return ""
+}
+
 func isMobyWorker(sb integration.Sandbox) bool {
-	name, hasFeature := driverName(sb.Name())
+	name, _, hasFeature := driverName(sb.Name())
 	return name == "docker" && !hasFeature
 }
 
 func isMobyContainerdSnapWorker(sb integration.Sandbox) bool {
-	name, hasFeature := driverName(sb.Name())
+	name, _, hasFeature := driverName(sb.Name())
 	return name == "docker" && hasFeature
 }
 
 func isDockerWorker(sb integration.Sandbox) bool {
-	name, _ := driverName(sb.Name())
+	name, _, _ := driverName(sb.Name())
 	return name == "docker"
 }
 
 func isDockerContainerWorker(sb integration.Sandbox) bool {
-	name, _ := driverName(sb.Name())
+	name, _, _ := driverName(sb.Name())
 	return name == "docker-container"
 }
 
-func driverName(sbName string) (string, bool) {
+func driverName(sbName string) (string, bool, bool) {
 	name := sbName
-	var hasFeature bool
+	var hasVersion, hasFeature bool
+	if b, _, ok := strings.Cut(sbName, "@"); ok {
+		name = b
+		hasVersion = true
+	}
 	if b, _, ok := strings.Cut(name, "+"); ok {
 		name = b
 		hasFeature = true
 	}
-	return name, hasFeature
+	return name, hasVersion, hasFeature
 }
 
 func isExperimental() bool {
@@ -196,4 +212,13 @@ func skipNoCompatBuildKit(t *testing.T, sb integration.Sandbox, constraint strin
 	if !matchesBuildKitVersion(t, sb, constraint) {
 		t.Skipf("buildkit version %s does not match %s constraint (%s)", buildkitVersion(t, sb), constraint, msg)
 	}
+}
+
+func ptrstr(s interface{}) *string {
+	var n *string
+	if reflect.ValueOf(s).Kind() == reflect.String {
+		ss := s.(string)
+		n = &ss
+	}
+	return n
 }

@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/defaults"
-	"github.com/containerd/containerd/pkg/dialer"
+	"github.com/containerd/containerd/v2/defaults"
+	"github.com/containerd/containerd/v2/pkg/dialer"
+	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/controller/pb"
 	"github.com/docker/buildx/util/progress"
 	"github.com/moby/buildkit/client"
@@ -27,6 +28,7 @@ func NewClient(ctx context.Context, addr string) (*Client, error) {
 		Backoff: backoffConfig,
 	}
 	gopts := []grpc.DialOption{
+		//nolint:staticcheck // ignore SA1019: WithBlock is deprecated and does not work with NewClient.
 		grpc.WithBlock(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithConnectParams(connParams),
@@ -36,6 +38,7 @@ func NewClient(ctx context.Context, addr string) (*Client, error) {
 		grpc.WithUnaryInterceptor(grpcerrors.UnaryClientInterceptor),
 		grpc.WithStreamInterceptor(grpcerrors.StreamClientInterceptor),
 	}
+	//nolint:staticcheck // ignore SA1019: Recommended NewClient has different behavior from DialContext.
 	conn, err := grpc.DialContext(ctx, dialer.DialAddress(addr), gopts...)
 	if err != nil {
 		return nil, err
@@ -72,36 +75,36 @@ func (c *Client) List(ctx context.Context) (keys []string, retErr error) {
 	return res.Keys, nil
 }
 
-func (c *Client) Disconnect(ctx context.Context, key string) error {
-	if key == "" {
+func (c *Client) Disconnect(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
 		return nil
 	}
-	_, err := c.client().Disconnect(ctx, &pb.DisconnectRequest{Ref: key})
+	_, err := c.client().Disconnect(ctx, &pb.DisconnectRequest{SessionID: sessionID})
 	return err
 }
 
-func (c *Client) ListProcesses(ctx context.Context, ref string) (infos []*pb.ProcessInfo, retErr error) {
-	res, err := c.client().ListProcesses(ctx, &pb.ListProcessesRequest{Ref: ref})
+func (c *Client) ListProcesses(ctx context.Context, sessionID string) (infos []*pb.ProcessInfo, retErr error) {
+	res, err := c.client().ListProcesses(ctx, &pb.ListProcessesRequest{SessionID: sessionID})
 	if err != nil {
 		return nil, err
 	}
 	return res.Infos, nil
 }
 
-func (c *Client) DisconnectProcess(ctx context.Context, ref, pid string) error {
-	_, err := c.client().DisconnectProcess(ctx, &pb.DisconnectProcessRequest{Ref: ref, ProcessID: pid})
+func (c *Client) DisconnectProcess(ctx context.Context, sessionID, pid string) error {
+	_, err := c.client().DisconnectProcess(ctx, &pb.DisconnectProcessRequest{SessionID: sessionID, ProcessID: pid})
 	return err
 }
 
-func (c *Client) Invoke(ctx context.Context, ref string, pid string, invokeConfig pb.InvokeConfig, in io.ReadCloser, stdout io.WriteCloser, stderr io.WriteCloser) error {
-	if ref == "" || pid == "" {
-		return errors.New("build reference must be specified")
+func (c *Client) Invoke(ctx context.Context, sessionID string, pid string, invokeConfig *pb.InvokeConfig, in io.ReadCloser, stdout io.WriteCloser, stderr io.WriteCloser) error {
+	if sessionID == "" || pid == "" {
+		return errors.New("build session ID must be specified")
 	}
 	stream, err := c.client().Invoke(ctx)
 	if err != nil {
 		return err
 	}
-	return attachIO(ctx, stream, &pb.InitMessage{Ref: ref, ProcessID: pid, InvokeConfig: &invokeConfig}, ioAttachConfig{
+	return attachIO(ctx, stream, &pb.InitMessage{SessionID: sessionID, ProcessID: pid, InvokeConfig: invokeConfig}, ioAttachConfig{
 		stdin:  in,
 		stdout: stdout,
 		stderr: stderr,
@@ -109,11 +112,11 @@ func (c *Client) Invoke(ctx context.Context, ref string, pid string, invokeConfi
 	})
 }
 
-func (c *Client) Inspect(ctx context.Context, ref string) (*pb.InspectResponse, error) {
-	return c.client().Inspect(ctx, &pb.InspectRequest{Ref: ref})
+func (c *Client) Inspect(ctx context.Context, sessionID string) (*pb.InspectResponse, error) {
+	return c.client().Inspect(ctx, &pb.InspectRequest{SessionID: sessionID})
 }
 
-func (c *Client) Build(ctx context.Context, options pb.BuildOptions, in io.ReadCloser, progress progress.Writer) (string, *client.SolveResponse, error) {
+func (c *Client) Build(ctx context.Context, options *pb.BuildOptions, in io.ReadCloser, progress progress.Writer) (string, *client.SolveResponse, *build.Inputs, error) {
 	ref := identity.NewID()
 	statusChan := make(chan *client.SolveStatus)
 	eg, egCtx := errgroup.WithContext(ctx)
@@ -131,10 +134,10 @@ func (c *Client) Build(ctx context.Context, options pb.BuildOptions, in io.ReadC
 		}
 		return nil
 	})
-	return ref, resp, eg.Wait()
+	return ref, resp, nil, eg.Wait()
 }
 
-func (c *Client) build(ctx context.Context, ref string, options pb.BuildOptions, in io.ReadCloser, statusChan chan *client.SolveStatus) (*client.SolveResponse, error) {
+func (c *Client) build(ctx context.Context, sessionID string, options *pb.BuildOptions, in io.ReadCloser, statusChan chan *client.SolveStatus) (*client.SolveResponse, error) {
 	eg, egCtx := errgroup.WithContext(ctx)
 	done := make(chan struct{})
 
@@ -143,8 +146,8 @@ func (c *Client) build(ctx context.Context, ref string, options pb.BuildOptions,
 	eg.Go(func() error {
 		defer close(done)
 		pbResp, err := c.client().Build(egCtx, &pb.BuildRequest{
-			Ref:     ref,
-			Options: &options,
+			SessionID: sessionID,
+			Options:   options,
 		})
 		if err != nil {
 			return err
@@ -156,7 +159,7 @@ func (c *Client) build(ctx context.Context, ref string, options pb.BuildOptions,
 	})
 	eg.Go(func() error {
 		stream, err := c.client().Status(egCtx, &pb.StatusRequest{
-			Ref: ref,
+			SessionID: sessionID,
 		})
 		if err != nil {
 			return err
@@ -181,7 +184,7 @@ func (c *Client) build(ctx context.Context, ref string, options pb.BuildOptions,
 			if err := stream.Send(&pb.InputMessage{
 				Input: &pb.InputMessage_Init{
 					Init: &pb.InputInitMessage{
-						Ref: ref,
+						SessionID: sessionID,
 					},
 				},
 			}); err != nil {
@@ -210,7 +213,7 @@ func (c *Client) build(ctx context.Context, ref string, options pb.BuildOptions,
 						}
 						return err
 					} else if n > 0 {
-						if stream.Send(&pb.InputMessage{
+						if err := stream.Send(&pb.InputMessage{
 							Input: &pb.InputMessage_Data{
 								Data: &pb.DataMessage{
 									Data: buf[:n],

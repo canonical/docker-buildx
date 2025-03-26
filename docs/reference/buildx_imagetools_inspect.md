@@ -12,8 +12,9 @@ Show details of an image in the registry
 | Name                    | Type     | Default         | Description                                   |
 |:------------------------|:---------|:----------------|:----------------------------------------------|
 | [`--builder`](#builder) | `string` |                 | Override the configured builder instance      |
+| `-D`, `--debug`         | `bool`   |                 | Enable debug logging                          |
 | [`--format`](#format)   | `string` | `{{.Manifest}}` | Format the output using the given Go template |
-| [`--raw`](#raw)         |          |                 | Show original, unformatted JSON manifest      |
+| [`--raw`](#raw)         | `bool`   |                 | Show original, unformatted JSON manifest      |
 
 
 <!---MARKER_GEN_END-->

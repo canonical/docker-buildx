@@ -16,18 +16,23 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/go-units"
 	"github.com/moby/buildkit/client"
+	gateway "github.com/moby/buildkit/frontend/gateway/client"
+	pb "github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/apicaps"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
 
 type pruneOptions struct {
-	builder     string
-	all         bool
-	filter      opts.FilterOpt
-	keepStorage opts.MemBytes
-	force       bool
-	verbose     bool
+	builder       string
+	all           bool
+	filter        opts.FilterOpt
+	reservedSpace opts.MemBytes
+	maxUsedSpace  opts.MemBytes
+	minFreeSpace  opts.MemBytes
+	force         bool
+	verbose       bool
 }
 
 const (
@@ -105,8 +110,19 @@ func runPrune(ctx context.Context, dockerCli command.Cli, opts pruneOptions) err
 					if err != nil {
 						return err
 					}
+					// check if the client supports newer prune options
+					if opts.maxUsedSpace.Value() != 0 || opts.minFreeSpace.Value() != 0 {
+						caps, err := loadLLBCaps(ctx, c)
+						if err != nil {
+							return errors.Wrap(err, "failed to load buildkit capabilities for prune")
+						}
+						if caps.Supports(pb.CapGCFreeSpaceFilter) != nil {
+							return errors.New("buildkit v0.17.0+ is required for max-used-space and min-free-space filters")
+						}
+					}
+
 					popts := []client.PruneOption{
-						client.WithKeepOpt(pi.KeepDuration, opts.keepStorage.Value()),
+						client.WithKeepOpt(pi.KeepDuration, opts.reservedSpace.Value(), opts.maxUsedSpace.Value(), opts.minFreeSpace.Value()),
 						client.WithFilter(pi.Filter),
 					}
 					if opts.all {
@@ -131,6 +147,17 @@ func runPrune(ctx context.Context, dockerCli command.Cli, opts pruneOptions) err
 	return nil
 }
 
+func loadLLBCaps(ctx context.Context, c *client.Client) (apicaps.CapSet, error) {
+	var caps apicaps.CapSet
+	_, err := c.Build(ctx, client.SolveOpt{
+		Internal: true,
+	}, "buildx", func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+		caps = c.BuildOpts().LLBCaps
+		return nil, nil
+	}, nil)
+	return caps, err
+}
+
 func pruneCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	options := pruneOptions{filter: opts.NewFilterOpt()}
 
@@ -148,9 +175,14 @@ func pruneCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	flags := cmd.Flags()
 	flags.BoolVarP(&options.all, "all", "a", false, "Include internal/frontend images")
 	flags.Var(&options.filter, "filter", `Provide filter values (e.g., "until=24h")`)
-	flags.Var(&options.keepStorage, "keep-storage", "Amount of disk space to keep for cache")
+	flags.Var(&options.reservedSpace, "reserved-space", "Amount of disk space always allowed to keep for cache")
+	flags.Var(&options.minFreeSpace, "min-free-space", "Target amount of free disk space after pruning")
+	flags.Var(&options.maxUsedSpace, "max-used-space", "Maximum amount of disk space allowed to keep for cache")
 	flags.BoolVar(&options.verbose, "verbose", false, "Provide a more verbose output")
 	flags.BoolVarP(&options.force, "force", "f", false, "Do not prompt for confirmation")
+
+	flags.Var(&options.reservedSpace, "keep-storage", "Amount of disk space to keep for cache")
+	flags.MarkDeprecated("keep-storage", "keep-storage flag has been changed to max-storage")
 
 	return cmd
 }
@@ -195,6 +227,8 @@ func toBuildkitPruneInfo(f filters.Args) (*client.PruneInfo, error) {
 		case 1:
 			if filterKey == "id" {
 				filters = append(filters, filterKey+"~="+values[0])
+			} else if strings.HasSuffix(filterKey, "!") || strings.HasSuffix(filterKey, "~") {
+				filters = append(filters, filterKey+"="+values[0])
 			} else {
 				filters = append(filters, filterKey+"=="+values[0])
 			}

@@ -1,8 +1,15 @@
-docker-buildx (0.14.1-0ubuntu1~20.04.1) focal; urgency=medium
+docker-buildx (0.20.1-0ubuntu1) plucky; urgency=medium
 
-  * Backport from oracular to focal. (LP: #2040461)
+  * d/watch: do not watch pre releases
+  * New upstream version 0.20.1
+  * d/control: build with golang 1.24 (LP: #2098662)
+  * d/rules: add golang 1.24 to PATH
+  * d/s/lintian-overrides: remove unused overrides
+  * d/docker-buildx.docs: update NOTICE file list
+  * d/copyright: update copyright data
+  * d/t/control: add missing B-D on file
 
- -- Athos Ribeiro <athos.ribeiro@canonical.com>  Mon, 14 Oct 2024 09:50:41 -0300
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Mon, 17 Feb 2025 14:34:35 -0300
 
 docker-buildx (0.14.1-0ubuntu1) oracular; urgency=medium
 
