@@ -3,6 +3,15 @@
 # https://github.com/docker/docker.github.io/blob/98c7c9535063ae4cd2cd0a31478a21d16d2f07a3/docker-bake.hcl#L34-L36
 name: docs-upstream
 
+# Default to 'contents: read', which grants actions to read commits.
+#
+# If any permission is set, any permission not included in the list is
+# implicitly set to "none".
+#
+# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -20,21 +29,24 @@ on:
       - '.github/workflows/docs-upstream.yml'
       - 'docs/**'
 
+env:
+  SETUP_BUILDX_VERSION: "edge"
+  SETUP_BUILDKIT_IMAGE: "moby/buildkit:latest"
+
 jobs:
   docs-yaml:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v4
       -
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
-          version: latest
+          version: ${{ env.SETUP_BUILDX_VERSION }}
+          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
+          buildkitd-flags: --debug
       -
         name: Build reference YAML docs
-        uses: docker/bake-action@v4
+        uses: docker/bake-action@v6
         with:
           targets: update-docs
           provenance: false
@@ -53,7 +65,7 @@ jobs:
           retention-days: 1
 
   validate:
-    uses: docker/docs/.github/workflows/validate-upstream.yml@6b73b05acb21edf7995cc5b3c6672d8e314cee7a  # pin for artifact v4 support: https://github.com/docker/docs/pull/19220
+    uses: docker/docs/.github/workflows/validate-upstream.yml@main
     needs:
       - docs-yaml
     with:

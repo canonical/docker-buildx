@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/containerd/console"
+	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/controller/control"
 	controllerapi "github.com/docker/buildx/controller/pb"
 	"github.com/docker/buildx/monitor/commands"
@@ -30,7 +31,7 @@ type MonitorBuildResult struct {
 }
 
 // RunMonitor provides an interactive session for running and managing containers via specified IO.
-func RunMonitor(ctx context.Context, curRef string, options *controllerapi.BuildOptions, invokeConfig controllerapi.InvokeConfig, c control.BuildxController, stdin io.ReadCloser, stdout io.WriteCloser, stderr console.File, progress *progress.Printer) (*MonitorBuildResult, error) {
+func RunMonitor(ctx context.Context, curRef string, options *controllerapi.BuildOptions, invokeConfig *controllerapi.InvokeConfig, c control.BuildxController, stdin io.ReadCloser, stdout io.WriteCloser, stderr console.File, progress *progress.Printer) (*MonitorBuildResult, error) {
 	defer func() {
 		if err := c.Disconnect(ctx, curRef); err != nil {
 			logrus.Warnf("disconnect error: %v", err)
@@ -243,8 +244,8 @@ type monitor struct {
 	lastBuildResult *MonitorBuildResult
 }
 
-func (m *monitor) Build(ctx context.Context, options controllerapi.BuildOptions, in io.ReadCloser, progress progress.Writer) (ref string, resp *client.SolveResponse, err error) {
-	ref, resp, err = m.BuildxController.Build(ctx, options, in, progress)
+func (m *monitor) Build(ctx context.Context, options *controllerapi.BuildOptions, in io.ReadCloser, progress progress.Writer) (ref string, resp *client.SolveResponse, input *build.Inputs, err error) {
+	ref, resp, _, err = m.BuildxController.Build(ctx, options, in, progress)
 	m.lastBuildResult = &MonitorBuildResult{Resp: resp, Err: err} // Record build result
 	return
 }
@@ -261,19 +262,19 @@ func (m *monitor) AttachedSessionID() string {
 	return m.ref.Load().(string)
 }
 
-func (m *monitor) Rollback(ctx context.Context, cfg controllerapi.InvokeConfig) string {
+func (m *monitor) Rollback(ctx context.Context, cfg *controllerapi.InvokeConfig) string {
 	pid := identity.NewID()
 	cfg1 := cfg
 	cfg1.Rollback = true
 	return m.startInvoke(ctx, pid, cfg1)
 }
 
-func (m *monitor) Exec(ctx context.Context, cfg controllerapi.InvokeConfig) string {
+func (m *monitor) Exec(ctx context.Context, cfg *controllerapi.InvokeConfig) string {
 	return m.startInvoke(ctx, identity.NewID(), cfg)
 }
 
 func (m *monitor) Attach(ctx context.Context, pid string) {
-	m.startInvoke(ctx, pid, controllerapi.InvokeConfig{})
+	m.startInvoke(ctx, pid, &controllerapi.InvokeConfig{})
 }
 
 func (m *monitor) Detach() {
@@ -290,7 +291,7 @@ func (m *monitor) close() {
 	m.Detach()
 }
 
-func (m *monitor) startInvoke(ctx context.Context, pid string, cfg controllerapi.InvokeConfig) string {
+func (m *monitor) startInvoke(ctx context.Context, pid string, cfg *controllerapi.InvokeConfig) string {
 	if m.invokeCancel != nil {
 		m.invokeCancel() // Finish existing attach
 	}
@@ -316,7 +317,7 @@ func (m *monitor) startInvoke(ctx context.Context, pid string, cfg controllerapi
 	return pid
 }
 
-func (m *monitor) invoke(ctx context.Context, pid string, cfg controllerapi.InvokeConfig) error {
+func (m *monitor) invoke(ctx context.Context, pid string, cfg *controllerapi.InvokeConfig) error {
 	m.muxIO.Enable(1)
 	defer m.muxIO.Disable(1)
 	if err := m.muxIO.SwitchTo(1); err != nil {
@@ -325,7 +326,7 @@ func (m *monitor) invoke(ctx context.Context, pid string, cfg controllerapi.Invo
 	if m.AttachedSessionID() == "" {
 		return nil
 	}
-	invokeCtx, invokeCancel := context.WithCancel(ctx)
+	invokeCtx, invokeCancel := context.WithCancelCause(ctx)
 
 	containerIn, containerOut := ioset.Pipe()
 	m.invokeIO.SetOut(&containerOut)
@@ -335,7 +336,7 @@ func (m *monitor) invoke(ctx context.Context, pid string, cfg controllerapi.Invo
 		cancelOnce.Do(func() {
 			containerIn.Close()
 			m.invokeIO.SetOut(nil)
-			invokeCancel()
+			invokeCancel(errors.WithStack(context.Canceled))
 		})
 		<-waitInvokeDoneCh
 	}
