@@ -1,3 +1,12 @@
+docker-buildx (0.20.1-0ubuntu1~24.04.1) noble; urgency=medium
+
+  * Backport from plucky to noble (LP: #2085187)
+  * d/control: build with golang 1.22 for consistency across the supported
+    release
+  * d/rules: add golang 1.22 to PATH
+
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Wed, 26 Mar 2025 16:21:58 -0300
+
 docker-buildx (0.20.1-0ubuntu1) plucky; urgency=medium
 
   * d/watch: do not watch pre releases
