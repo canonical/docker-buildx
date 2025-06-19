@@ -1,3 +1,9 @@
+docker-buildx (0.20.1-0ubuntu1~22.04.2) jammy-security; urgency=medium
+
+  * No change rebuild due to golang-1.22 update
+
+ -- Evan Caville <evan.caville@canonical.com>  Thu, 19 Jun 2025 15:10:55 +1000
+
 docker-buildx (0.20.1-0ubuntu1~22.04.1) jammy; urgency=medium
 
   * Backport from plucky to jammy (LP: #2085187)
