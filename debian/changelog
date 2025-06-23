@@ -1,3 +1,9 @@
+docker-buildx (0.20.1-0ubuntu1~24.04.2) noble-security; urgency=medium
+
+  * No change rebuild due to golang-1.22 update
+
+ -- Evan Caville <evan.caville@canonical.com>  Mon, 23 Jun 2025 12:28:26 +1000
+
 docker-buildx (0.20.1-0ubuntu1~24.04.1) noble; urgency=medium
 
   * Backport from plucky to noble (LP: #2085187)
