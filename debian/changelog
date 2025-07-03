@@ -1,3 +1,12 @@
+docker-buildx (0.21.3-0ubuntu1) questing; urgency=medium
+
+  * d/watch: fetch releases data from the Github API. This allows us to fetch
+    more available versions
+  * New upstream version 0.21.3:
+    - CVE-2025-0495
+
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Thu, 03 Jul 2025 10:30:29 -0300
+
 docker-buildx (0.20.1-0ubuntu1) plucky; urgency=medium
 
   * d/watch: do not watch pre releases
