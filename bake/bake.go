@@ -27,7 +27,6 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session/auth/authprovider"
-	"github.com/moby/buildkit/util/entitlements"
 	"github.com/pkg/errors"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
@@ -1130,7 +1129,9 @@ func (t *Target) GetName(ectx *hcl.EvalContext, block *hcl.Block, loadDeps func(
 func TargetsToBuildOpt(m map[string]*Target, inp *Input) (map[string]build.Options, error) {
 	// make sure local credentials are loaded multiple times for different targets
 	dockerConfig := config.LoadDefaultConfigFile(os.Stderr)
-	authProvider := authprovider.NewDockerAuthProvider(dockerConfig, nil)
+	authProvider := authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
+		ConfigFile: dockerConfig,
+	})
 
 	m2 := make(map[string]build.Options, len(m))
 	for k, v := range m {
@@ -1432,9 +1433,7 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	}
 	bo.Ulimits = ulimits
 
-	for _, ent := range t.Entitlements {
-		bo.Allow = append(bo.Allow, entitlements.Entitlement(ent))
-	}
+	bo.Allow = append(bo.Allow, t.Entitlements...)
 
 	return bo, nil
 }
