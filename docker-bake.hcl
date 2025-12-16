@@ -38,6 +38,9 @@ target "lint" {
   inherits = ["_common"]
   dockerfile = "./hack/dockerfiles/lint.Dockerfile"
   output = ["type=cacheonly"]
+  args = {
+    GOLANGCI_FROM_SOURCE = "true"
+  }
   platforms = GOLANGCI_LINT_MULTIPLATFORM != "" ? [
     "darwin/amd64",
     "darwin/arm64",
@@ -48,6 +51,8 @@ target "lint" {
     "linux/s390x",
     "linux/ppc64le",
     "linux/riscv64",
+    "netbsd/amd64",
+    "netbsd/arm64",
     "openbsd/amd64",
     "openbsd/arm64",
     "windows/amd64",
@@ -66,6 +71,13 @@ target "validate-golangci" {
 target "lint-gopls" {
   inherits = ["lint"]
   target = "gopls-analyze"
+}
+
+target "modernize-fix" {
+  inherits = ["_common"]
+  dockerfile = "./hack/dockerfiles/lint.Dockerfile"
+  target = "modernize-fix"
+  output = ["."]
 }
 
 target "validate-vendor" {
@@ -93,13 +105,6 @@ target "validate-authors" {
   output = ["type=cacheonly"]
 }
 
-target "validate-generated-files" {
-  inherits = ["_common"]
-  dockerfile = "./hack/dockerfiles/generated-files.Dockerfile"
-  target = "validate"
-  output = ["type=cacheonly"]
-}
-
 target "update-vendor" {
   inherits = ["_common"]
   dockerfile = "./hack/dockerfiles/vendor.Dockerfile"
@@ -121,13 +126,6 @@ target "update-docs" {
 target "update-authors" {
   inherits = ["_common"]
   dockerfile = "./hack/dockerfiles/authors.Dockerfile"
-  target = "update"
-  output = ["."]
-}
-
-target "update-generated-files" {
-  inherits = ["_common"]
-  dockerfile = "./hack/dockerfiles/generated-files.Dockerfile"
   target = "update"
   output = ["."]
 }
@@ -167,6 +165,8 @@ target "binaries-cross" {
     "linux/ppc64le",
     "linux/riscv64",
     "linux/s390x",
+    "netbsd/amd64",
+    "netbsd/arm64",
     "openbsd/amd64",
     "openbsd/arm64",
     "windows/amd64",

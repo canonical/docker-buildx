@@ -59,8 +59,7 @@ type Span struct {
 	Resource []attribute.KeyValue
 	// InstrumentationLibrary is information about the library that produced
 	// the span
-	//nolint:staticcheck
-	InstrumentationLibrary instrumentation.Library
+	InstrumentationLibrary instrumentation.Scope
 }
 
 type Spans []Span
@@ -112,8 +111,8 @@ type spanData struct {
 	DroppedLinks      int
 	ChildSpanCount    int
 	Resource          []keyValue // change this type from the otel type to make this struct marshallable
-	//nolint:staticcheck
-	InstrumentationLibrary instrumentation.Library
+
+	InstrumentationLibrary instrumentation.Scope
 }
 
 // spanContext is a custom type used to unmarshal otel SpanContext correctly.
@@ -149,7 +148,7 @@ type keyValue struct {
 // value is a custom type used to unmarshal otel Value correctly.
 type value struct {
 	Type  string
-	Value interface{}
+	Value any
 }
 
 // UnmarshalJSON implements json.Unmarshaler for Span which allows correctly
@@ -318,7 +317,7 @@ func (kv *keyValue) asAttributeKeyValue() (attribute.KeyValue, error) {
 		switch sli := kv.Value.Value.(type) {
 		case []string:
 			strSli = sli
-		case []interface{}:
+		case []any:
 			for i := range sli {
 				var v string
 				// best case we have a string, otherwise, cast it using
@@ -484,8 +483,6 @@ func (s spanSnapshot) InstrumentationScope() instrumentation.Scope {
 }
 
 // InstrumentationLibrary returns the InstrumentationLibrary of the snapshot
-//
-//nolint:staticcheck
-func (s spanSnapshot) InstrumentationLibrary() instrumentation.Library {
+func (s spanSnapshot) InstrumentationLibrary() instrumentation.Scope {
 	return s.instrumentationScope
 }

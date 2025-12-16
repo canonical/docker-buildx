@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 
-	controllerapi "github.com/docker/buildx/controller/pb"
 	"github.com/pkg/errors"
 	"github.com/tonistiigi/go-csvvalue"
 )
@@ -27,19 +26,7 @@ func (s Secrets) Normalize() Secrets {
 	if len(s) == 0 {
 		return nil
 	}
-	return removeDupes(s)
-}
-
-func (s Secrets) ToPB() []*controllerapi.Secret {
-	if len(s) == 0 {
-		return nil
-	}
-
-	entries := make([]*controllerapi.Secret, len(s))
-	for i, entry := range s {
-		entries[i] = entry.ToPB()
-	}
-	return entries
+	return removeSecretDupes(s)
 }
 
 type Secret struct {
@@ -64,14 +51,6 @@ func (s *Secret) String() string {
 		b.Write("env", s.Env)
 	}
 	return b.String()
-}
-
-func (s *Secret) ToPB() *controllerapi.Secret {
-	return &controllerapi.Secret{
-		ID:       s.ID,
-		FilePath: s.FilePath,
-		Env:      s.Env,
-	}
 }
 
 func (s *Secret) UnmarshalJSON(data []byte) error {
@@ -132,8 +111,8 @@ func (s *Secret) UnmarshalText(text []byte) error {
 	return nil
 }
 
-func ParseSecretSpecs(sl []string) ([]*controllerapi.Secret, error) {
-	fs := make([]*controllerapi.Secret, 0, len(sl))
+func ParseSecretSpecs(sl []string) (Secrets, error) {
+	fs := make([]*Secret, 0, len(sl))
 	for _, v := range sl {
 		if v == "" {
 			continue
@@ -148,10 +127,24 @@ func ParseSecretSpecs(sl []string) ([]*controllerapi.Secret, error) {
 	return fs, nil
 }
 
-func parseSecret(value string) (*controllerapi.Secret, error) {
+func parseSecret(value string) (*Secret, error) {
 	var s Secret
 	if err := s.UnmarshalText([]byte(value)); err != nil {
 		return nil, err
 	}
-	return s.ToPB(), nil
+	return &s, nil
+}
+
+func removeSecretDupes(s []*Secret) []*Secret {
+	var res []*Secret
+	m := map[string]int{}
+	for _, sec := range s {
+		if i, ok := m[sec.ID]; ok {
+			res[i] = sec
+		} else {
+			m[sec.ID] = len(res)
+			res = append(res, sec)
+		}
+	}
+	return res
 }

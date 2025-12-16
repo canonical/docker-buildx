@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/util/buildflags"
@@ -16,7 +18,7 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -31,6 +33,7 @@ type createOptions struct {
 	actionAppend bool
 	progress     string
 	preferIndex  bool
+	platforms    []string
 }
 
 func runCreate(ctx context.Context, dockerCli command.Cli, in createOptions, args []string) error {
@@ -63,6 +66,11 @@ func runCreate(ctx context.Context, dockerCli command.Cli, in createOptions, arg
 	}
 
 	srcs, err := parseSources(args)
+	if err != nil {
+		return err
+	}
+
+	platforms, err := parsePlatforms(in.platforms)
 	if err != nil {
 		return err
 	}
@@ -160,7 +168,7 @@ func runCreate(ctx context.Context, dockerCli command.Cli, in createOptions, arg
 		return errors.Wrapf(err, "failed to parse annotations")
 	}
 
-	dt, desc, err := r.Combine(ctx, srcs, annotations, in.preferIndex)
+	dt, desc, manifests, err := r.Combine(ctx, srcs, annotations, in.preferIndex, platforms)
 	if err != nil {
 		return err
 	}
@@ -170,12 +178,21 @@ func runCreate(ctx context.Context, dockerCli command.Cli, in createOptions, arg
 		return nil
 	}
 
+	// manifests can be nil only if pushing one single-platform desc directly
+	if manifests == nil {
+		manifests = []imagetools.DescWithSource{{Descriptor: desc, Source: srcs[0]}}
+	}
+
 	// new resolver cause need new auth
 	r = imagetools.New(imageopt)
 
 	ctx2, cancel := context.WithCancelCause(context.TODO())
 	defer func() { cancel(errors.WithStack(context.Canceled)) }()
-	printer, err := progress.NewPrinter(ctx2, os.Stderr, progressui.DisplayMode(in.progress))
+	progressMode := in.progress
+	if progressMode == "none" {
+		progressMode = "quiet"
+	}
+	printer, err := progress.NewPrinter(ctx2, os.Stderr, progressui.DisplayMode(progressMode))
 	if err != nil {
 		return err
 	}
@@ -184,25 +201,22 @@ func runCreate(ctx context.Context, dockerCli command.Cli, in createOptions, arg
 	pw := progress.WithPrefix(printer, "internal", true)
 
 	for _, t := range tags {
-		t := t
 		eg.Go(func() error {
 			return progress.Wrap(fmt.Sprintf("pushing %s", t.String()), pw.Write, func(sub progress.SubLogger) error {
+				baseCtx := ctx
 				eg2, _ := errgroup.WithContext(ctx)
-				for _, s := range srcs {
-					if reference.Domain(s.Ref) == reference.Domain(t) && reference.Path(s.Ref) == reference.Path(t) {
-						continue
-					}
-					s := s
+				for _, desc := range manifests {
 					eg2.Go(func() error {
-						sub.Log(1, []byte(fmt.Sprintf("copying %s from %s to %s\n", s.Desc.Digest.String(), s.Ref.String(), t.String())))
-						return r.Copy(ctx, s, t)
+						ctx = withMediaTypeKeyPrefix(baseCtx)
+						sub.Log(1, fmt.Appendf(nil, "copying %s from %s to %s\n", desc.Digest.String(), desc.Source.Ref.String(), t.String()))
+						return r.Copy(ctx, desc.Source, t)
 					})
 				}
-
 				if err := eg2.Wait(); err != nil {
 					return err
 				}
-				sub.Log(1, []byte(fmt.Sprintf("pushing %s to %s\n", desc.Digest.String(), t.String())))
+				ctx = withMediaTypeKeyPrefix(ctx) // because of containerd bug this needs to be called separately for each ctx/goroutine pair to avoid concurrent map write
+				sub.Log(1, fmt.Appendf(nil, "pushing %s to %s\n", desc.Digest.String(), t.String()))
 				return r.Push(ctx, t, desc, dt)
 			})
 		})
@@ -229,6 +243,34 @@ func parseSources(in []string) ([]*imagetools.Source, error) {
 	return out, nil
 }
 
+func parsePlatforms(in []string) ([]ocispecs.Platform, error) {
+	out := make([]ocispecs.Platform, 0, len(in))
+	for _, p := range in {
+		if arr := strings.Split(p, ","); len(arr) > 1 {
+			v, err := parsePlatforms(arr)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, v...)
+			continue
+		}
+		plat, err := platforms.Parse(p)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid platform %q", p)
+		}
+		out = append(out, plat)
+	}
+	return out, nil
+}
+
+func withMediaTypeKeyPrefix(ctx context.Context) context.Context {
+	ctx = remotes.WithMediaTypeKeyPrefix(ctx, "application/vnd.oci.empty.v1+json", "empty")
+	ctx = remotes.WithMediaTypeKeyPrefix(ctx, "application/vnd.dev.cosign.artifact.sig.v1+json", "cosign")
+	ctx = remotes.WithMediaTypeKeyPrefix(ctx, "application/vnd.dev.cosign.simplesigning.v1+json", "simplesigning")
+	ctx = remotes.WithMediaTypeKeyPrefix(ctx, "application/vnd.dev.sigstore.bundle.v0.3+json", "sigstore-bundle")
+	return ctx
+}
+
 func parseRefs(in []string) ([]reference.Named, error) {
 	refs := make([]reference.Named, len(in))
 	for i, in := range in {
@@ -246,7 +288,7 @@ func parseSource(in string) (*imagetools.Source, error) {
 	dgst, err := digest.Parse(in)
 	if err == nil {
 		return &imagetools.Source{
-			Desc: ocispec.Descriptor{
+			Desc: ocispecs.Descriptor{
 				Digest: dgst,
 			},
 		}, nil
@@ -274,13 +316,14 @@ func createCmd(dockerCli command.Cli, opts RootOptions) *cobra.Command {
 	var options createOptions
 
 	cmd := &cobra.Command{
-		Use:   "create [OPTIONS] [SOURCE] [SOURCE...]",
+		Use:   "create [OPTIONS] [SOURCE...]",
 		Short: "Create a new image based on source images",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			options.builder = *opts.Builder
 			return runCreate(cmd.Context(), dockerCli, options, args)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -288,16 +331,17 @@ func createCmd(dockerCli command.Cli, opts RootOptions) *cobra.Command {
 	flags.StringArrayVarP(&options.tags, "tag", "t", []string{}, "Set reference for new image")
 	flags.BoolVar(&options.dryrun, "dry-run", false, "Show final image instead of pushing")
 	flags.BoolVar(&options.actionAppend, "append", false, "Append to existing manifest")
-	flags.StringVar(&options.progress, "progress", "auto", `Set type of progress output ("auto", "plain", "tty", "rawjson"). Use plain to show container output`)
+	flags.StringVar(&options.progress, "progress", "auto", `Set type of progress output ("auto", "none", "plain", "rawjson", "tty"). Use plain to show container output`)
 	flags.StringArrayVarP(&options.annotations, "annotation", "", []string{}, "Add annotation to the image")
 	flags.BoolVar(&options.preferIndex, "prefer-index", true, "When only a single source is specified, prefer outputting an image index or manifest list instead of performing a carbon copy")
+	flags.StringArrayVarP(&options.platforms, "platform", "p", []string{}, "Filter specified platforms of target image")
 
 	return cmd
 }
 
-func mergeDesc(d1, d2 ocispec.Descriptor) (ocispec.Descriptor, error) {
+func mergeDesc(d1, d2 ocispecs.Descriptor) (ocispecs.Descriptor, error) {
 	if d2.Size != 0 && d1.Size != d2.Size {
-		return ocispec.Descriptor{}, errors.Errorf("invalid size mismatch for %s, %d != %d", d1.Digest, d2.Size, d1.Size)
+		return ocispecs.Descriptor{}, errors.Errorf("invalid size mismatch for %s, %d != %d", d1.Digest, d2.Size, d1.Size)
 	}
 	if d2.MediaType != "" {
 		d1.MediaType = d2.MediaType

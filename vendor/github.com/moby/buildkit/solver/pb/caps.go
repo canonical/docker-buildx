@@ -12,6 +12,7 @@ const (
 	CapSourceImage            apicaps.CapID = "source.image"
 	CapSourceImageResolveMode apicaps.CapID = "source.image.resolvemode"
 	CapSourceImageLayerLimit  apicaps.CapID = "source.image.layerlimit"
+	CapSourceImageChecksum    apicaps.CapID = "source.image.checksum"
 
 	CapSourceLocal                apicaps.CapID = "source.local"
 	CapSourceLocalUnique          apicaps.CapID = "source.local.unique"
@@ -21,19 +22,26 @@ const (
 	CapSourceLocalExcludePatterns apicaps.CapID = "source.local.excludepatterns"
 	CapSourceLocalSharedKeyHint   apicaps.CapID = "source.local.sharedkeyhint"
 	CapSourceLocalDiffer          apicaps.CapID = "source.local.differ"
+	CapSourceMetadataTransfer     apicaps.CapID = "source.local.metadatatransfer"
 
-	CapSourceGit              apicaps.CapID = "source.git"
-	CapSourceGitKeepDir       apicaps.CapID = "source.git.keepgitdir"
-	CapSourceGitFullURL       apicaps.CapID = "source.git.fullurl"
-	CapSourceGitHTTPAuth      apicaps.CapID = "source.git.httpauth"
-	CapSourceGitKnownSSHHosts apicaps.CapID = "source.git.knownsshhosts"
-	CapSourceGitMountSSHSock  apicaps.CapID = "source.git.mountsshsock"
-	CapSourceGitSubdir        apicaps.CapID = "source.git.subdir"
+	CapSourceGit                apicaps.CapID = "source.git"
+	CapSourceGitKeepDir         apicaps.CapID = "source.git.keepgitdir"
+	CapSourceGitFullURL         apicaps.CapID = "source.git.fullurl"
+	CapSourceGitHTTPAuth        apicaps.CapID = "source.git.httpauth"
+	CapSourceGitKnownSSHHosts   apicaps.CapID = "source.git.knownsshhosts"
+	CapSourceGitMountSSHSock    apicaps.CapID = "source.git.mountsshsock"
+	CapSourceGitSubdir          apicaps.CapID = "source.git.subdir"
+	CapSourceGitChecksum        apicaps.CapID = "source.git.checksum"
+	CapSourceGitSkipSubmodules  apicaps.CapID = "source.git.skipsubmodules"
+	CapSourceGitSignatureVerify apicaps.CapID = "source.git.signatureverify"
 
 	CapSourceHTTP         apicaps.CapID = "source.http"
+	CapSourceHTTPAuth     apicaps.CapID = "source.http.auth"
 	CapSourceHTTPChecksum apicaps.CapID = "source.http.checksum"
 	CapSourceHTTPPerm     apicaps.CapID = "source.http.perm"
-	CapSourceHTTPUIDGID   apicaps.CapID = "soruce.http.uidgid"
+	// NOTE the historical typo
+	CapSourceHTTPUIDGID apicaps.CapID = "soruce.http.uidgid"
+	CapSourceHTTPHeader apicaps.CapID = "source.http.header"
 
 	CapSourceOCILayout apicaps.CapID = "source.ocilayout"
 
@@ -66,6 +74,7 @@ const (
 	CapFileBase                               apicaps.CapID = "file.base"
 	CapFileRmWildcard                         apicaps.CapID = "file.rm.wildcard"
 	CapFileCopyIncludeExcludePatterns         apicaps.CapID = "file.copy.includeexcludepatterns"
+	CapFileCopyRequiredPaths                  apicaps.CapID = "file.copy.requiredpaths"
 	CapFileRmNoFollowSymlink                  apicaps.CapID = "file.rm.nofollowsymlink"
 	CapFileCopyAlwaysReplaceExistingDestPaths apicaps.CapID = "file.copy.alwaysreplaceexistingdestpaths"
 	CapFileCopyModeStringFormat               apicaps.CapID = "file.copy.modestring"
@@ -92,8 +101,10 @@ const (
 	CapSourceDateEpoch apicaps.CapID = "exporter.sourcedateepoch"
 
 	CapMultipleExporters apicaps.CapID = "exporter.multiple"
+	CapSessionExporter   apicaps.CapID = "exporter.session"
 
-	CapSourcePolicy apicaps.CapID = "source.policy"
+	CapSourcePolicy        apicaps.CapID = "source.policy"
+	CapSourcePolicySession apicaps.CapID = "source.policy.session"
 
 	// GC/Prune controls allow MinFreeSpace and MaxUsedSpace to be set
 	CapGCFreeSpaceFilter apicaps.CapID = "gc.freespacefilter"
@@ -117,6 +128,12 @@ func init() {
 
 	Caps.Init(apicaps.Cap{
 		ID:      CapSourceImageLayerLimit,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceImageChecksum,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
 	})
@@ -170,6 +187,12 @@ func init() {
 	})
 
 	Caps.Init(apicaps.Cap{
+		ID:      CapSourceMetadataTransfer,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
 		ID:      CapSourceGit,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
@@ -212,6 +235,24 @@ func init() {
 	})
 
 	Caps.Init(apicaps.Cap{
+		ID:      CapSourceGitChecksum,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceGitSkipSubmodules,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceGitSignatureVerify,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
 		ID:      CapSourceHTTP,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
@@ -230,13 +271,25 @@ func init() {
 	})
 
 	Caps.Init(apicaps.Cap{
-		ID:      CapSourceOCILayout,
+		ID:      CapSourceHTTPAuth,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
 	})
 
 	Caps.Init(apicaps.Cap{
 		ID:      CapSourceHTTPUIDGID,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceHTTPHeader,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceOCILayout,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
 	})
@@ -408,6 +461,12 @@ func init() {
 	})
 
 	Caps.Init(apicaps.Cap{
+		ID:      CapFileCopyRequiredPaths,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
 		ID:      CapFileCopyAlwaysReplaceExistingDestPaths,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
@@ -505,7 +564,19 @@ func init() {
 	})
 
 	Caps.Init(apicaps.Cap{
+		ID:      CapSessionExporter,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
 		ID:      CapSourcePolicy,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourcePolicySession,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
 	})

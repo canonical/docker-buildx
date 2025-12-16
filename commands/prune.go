@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -169,12 +170,13 @@ func pruneCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 			options.builder = rootOpts.builder
 			return runPrune(cmd.Context(), dockerCli, options)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
 	flags.BoolVarP(&options.all, "all", "a", false, "Include internal/frontend images")
-	flags.Var(&options.filter, "filter", `Provide filter values (e.g., "until=24h")`)
+	flags.Var(&options.filter, "filter", `Provide filter values`)
 	flags.Var(&options.reservedSpace, "reserved-space", "Amount of disk space always allowed to keep for cache")
 	flags.Var(&options.minFreeSpace, "min-free-space", "Target amount of free disk space after pruning")
 	flags.Var(&options.maxUsedSpace, "max-used-space", "Maximum amount of disk space allowed to keep for cache")
@@ -182,7 +184,7 @@ func pruneCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	flags.BoolVarP(&options.force, "force", "f", false, "Do not prompt for confirmation")
 
 	flags.Var(&options.reservedSpace, "keep-storage", "Amount of disk space to keep for cache")
-	flags.MarkDeprecated("keep-storage", "keep-storage flag has been changed to max-storage")
+	flags.MarkDeprecated("keep-storage", "keep-storage flag has been changed to reserved-space")
 
 	return cmd
 }
@@ -240,4 +242,56 @@ func toBuildkitPruneInfo(f filters.Args) (*client.PruneInfo, error) {
 		KeepDuration: until,
 		Filter:       []string{strings.Join(filters, ",")},
 	}, nil
+}
+
+func printKV(w io.Writer, k string, v any) {
+	fmt.Fprintf(w, "%s:\t%v\n", k, v)
+}
+
+func printVerbose(tw *tabwriter.Writer, du []*client.UsageInfo) {
+	for _, di := range du {
+		printKV(tw, "ID", di.ID)
+		if len(di.Parents) != 0 {
+			printKV(tw, "Parent", strings.Join(di.Parents, ","))
+		}
+		printKV(tw, "Created at", di.CreatedAt)
+		printKV(tw, "Mutable", di.Mutable)
+		printKV(tw, "Reclaimable", !di.InUse)
+		printKV(tw, "Shared", di.Shared)
+		printKV(tw, "Size", units.HumanSize(float64(di.Size)))
+		if di.Description != "" {
+			printKV(tw, "Description", di.Description)
+		}
+		printKV(tw, "Usage count", di.UsageCount)
+		if di.LastUsedAt != nil {
+			printKV(tw, "Last used", units.HumanDuration(time.Since(*di.LastUsedAt))+" ago")
+		}
+		if di.RecordType != "" {
+			printKV(tw, "Type", di.RecordType)
+		}
+
+		fmt.Fprintf(tw, "\n")
+	}
+
+	tw.Flush()
+}
+
+func printTableHeader(tw *tabwriter.Writer) {
+	fmt.Fprintln(tw, "ID\tRECLAIMABLE\tSIZE\tLAST ACCESSED")
+}
+
+func printTableRow(tw *tabwriter.Writer, di *client.UsageInfo) {
+	id := di.ID
+	if di.Mutable {
+		id += "*"
+	}
+	size := units.HumanSize(float64(di.Size))
+	if di.Shared {
+		size += "*"
+	}
+	lastAccessed := ""
+	if di.LastUsedAt != nil {
+		lastAccessed = units.HumanDuration(time.Since(*di.LastUsedAt)) + " ago"
+	}
+	fmt.Fprintf(tw, "%-40s\t%-5v\t%-10s\t%s\n", id, !di.InUse, size, lastAccessed)
 }

@@ -4,9 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
-	"slices"
 
-	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/buildx/util/progress"
 	"github.com/docker/cli/cli/command"
@@ -24,22 +22,12 @@ type logsOptions struct {
 }
 
 func runLogs(ctx context.Context, dockerCli command.Cli, opts logsOptions) error {
-	b, err := builder.New(dockerCli, builder.WithName(opts.builder))
+	nodes, err := loadNodes(ctx, dockerCli, opts.builder)
 	if err != nil {
 		return err
 	}
 
-	nodes, err := b.LoadNodes(ctx)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if node.Err != nil {
-			return node.Err
-		}
-	}
-
-	recs, err := queryRecords(ctx, opts.ref, nodes)
+	recs, err := queryRecords(ctx, opts.ref, nodes, nil)
 	if err != nil {
 		return err
 	}
@@ -49,12 +37,6 @@ func runLogs(ctx context.Context, dockerCli command.Cli, opts logsOptions) error
 			return errors.New("no records found")
 		}
 		return errors.Errorf("no record found for ref %q", opts.ref)
-	}
-
-	if opts.ref == "" {
-		slices.SortFunc(recs, func(a, b historyRecord) int {
-			return b.CreatedAt.AsTime().Compare(a.CreatedAt.AsTime())
-		})
 	}
 
 	rec := &recs[0]
@@ -70,7 +52,7 @@ func runLogs(ctx context.Context, dockerCli command.Cli, opts logsOptions) error
 		return err
 	}
 
-	var mode progressui.DisplayMode = progressui.DisplayMode(opts.progress)
+	mode := progressui.DisplayMode(opts.progress)
 	if mode == progressui.AutoMode {
 		mode = progressui.PlainMode
 	}
@@ -105,7 +87,7 @@ func logsCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "logs [OPTIONS] [REF]",
-		Short: "Print the logs of a build",
+		Short: "Print the logs of a build record",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -114,7 +96,8 @@ func logsCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 			options.builder = *rootOpts.Builder
 			return runLogs(cmd.Context(), dockerCli, options)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()

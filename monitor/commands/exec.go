@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	controllerapi "github.com/docker/buildx/controller/pb"
+	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/monitor/types"
 	"github.com/pkg/errors"
 )
@@ -13,11 +13,11 @@ import (
 type ExecCmd struct {
 	m types.Monitor
 
-	invokeConfig *controllerapi.InvokeConfig
+	invokeConfig *build.InvokeConfig
 	stdout       io.WriteCloser
 }
 
-func NewExecCmd(m types.Monitor, invokeConfig *controllerapi.InvokeConfig, stdout io.WriteCloser) types.Command {
+func NewExecCmd(m types.Monitor, invokeConfig *build.InvokeConfig, stdout io.WriteCloser) types.Command {
 	return &ExecCmd{m, invokeConfig, stdout}
 }
 
@@ -35,13 +35,10 @@ COMMAND and ARG... will be executed in the container.
 }
 
 func (cm *ExecCmd) Exec(ctx context.Context, args []string) error {
-	if ref := cm.m.AttachedSessionID(); ref == "" {
-		return errors.Errorf("no attaching session")
-	}
 	if len(args) < 2 {
 		return errors.Errorf("command must be passed")
 	}
-	cfg := &controllerapi.InvokeConfig{
+	cfg := &build.InvokeConfig{
 		Entrypoint: []string{args[1]},
 		Cmd:        args[2:],
 		NoCmd:      false,

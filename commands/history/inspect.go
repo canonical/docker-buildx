@@ -20,7 +20,6 @@ import (
 	"github.com/containerd/containerd/v2/core/content/proxy"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/platforms"
-	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/localstate"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/buildx/util/confutil"
@@ -89,7 +88,7 @@ type inspectOutput struct {
 	BuildArgs []keyValueOutput `json:",omitempty"`
 	Labels    []keyValueOutput `json:",omitempty"`
 
-	Config configOutput `json:",omitempty"`
+	Config configOutput
 
 	Materials   []materialOutput   `json:",omitempty"`
 	Attachments []attachmentOutput `json:",omitempty"`
@@ -158,22 +157,12 @@ func readAttr[T any](attrs map[string]string, k string, dest *T, f func(v string
 }
 
 func runInspect(ctx context.Context, dockerCli command.Cli, opts inspectOptions) error {
-	b, err := builder.New(dockerCli, builder.WithName(opts.builder))
+	nodes, err := loadNodes(ctx, dockerCli, opts.builder)
 	if err != nil {
 		return err
 	}
 
-	nodes, err := b.LoadNodes(ctx)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if node.Err != nil {
-			return node.Err
-		}
-	}
-
-	recs, err := queryRecords(ctx, opts.ref, nodes)
+	recs, err := queryRecords(ctx, opts.ref, nodes, nil)
 	if err != nil {
 		return err
 	}
@@ -185,14 +174,7 @@ func runInspect(ctx context.Context, dockerCli command.Cli, opts inspectOptions)
 		return errors.Errorf("no record found for ref %q", opts.ref)
 	}
 
-	if opts.ref == "" {
-		slices.SortFunc(recs, func(a, b historyRecord) int {
-			return b.CreatedAt.AsTime().Compare(a.CreatedAt.AsTime())
-		})
-	}
-
 	rec := &recs[0]
-
 	c, err := rec.node.Driver.Client(ctx)
 	if err != nil {
 		return err
@@ -261,7 +243,7 @@ workers0:
 	}
 	delete(attrs, "filename")
 
-	out.Name = buildName(rec.FrontendAttrs, st)
+	out.Name = BuildName(rec.FrontendAttrs, st)
 	out.Ref = rec.Ref
 
 	out.Context = context
@@ -281,7 +263,7 @@ workers0:
 	readAttr(attrs, "platform", &out.Platform, func(v string) ([]string, bool) {
 		return tryParseValue(v, &out.Errors, func(v string) ([]string, error) {
 			var pp []string
-			for _, v := range strings.Split(v, ",") {
+			for v := range strings.SplitSeq(v, ",") {
 				p, err := platforms.Parse(v)
 				if err != nil {
 					return nil, err
@@ -342,9 +324,9 @@ workers0:
 			out.Error.Sources = errsources.Bytes()
 			var ve *errdefs.VertexError
 			if errors.As(retErr, &ve) {
-				dgst, err := digest.Parse(ve.Vertex.Digest)
+				dgst, err := digest.Parse(ve.Digest)
 				if err != nil {
-					return errors.Wrapf(err, "failed to parse vertex digest %s", ve.Vertex.Digest)
+					return errors.Wrapf(err, "failed to parse vertex digest %s", ve.Digest)
 				}
 				name, logs, err := loadVertexLogs(ctx, c, rec.Ref, dgst, 16)
 				if err != nil {
@@ -353,7 +335,7 @@ workers0:
 				out.Error.Name = name
 				out.Error.Logs = logs
 			}
-			out.Error.Stack = []byte(fmt.Sprintf("%+v", stack.Formatter(retErr)))
+			out.Error.Stack = fmt.Appendf(nil, "%+v", stack.Formatter(retErr))
 		}
 	}
 
@@ -433,23 +415,32 @@ workers0:
 	}
 
 	provIndex := slices.IndexFunc(attachments, func(a attachment) bool {
-		return descrType(a.descr) == slsa02.PredicateSLSAProvenance
+		return strings.HasPrefix(descrType(a.descr), "https://slsa.dev/provenance/")
 	})
 	if provIndex != -1 {
 		prov := attachments[provIndex]
+		predType := descrType(prov.descr)
 		dt, err := content.ReadBlob(ctx, store, prov.descr)
 		if err != nil {
 			return errors.Errorf("failed to read provenance %s: %v", prov.descr.Digest, err)
 		}
-		var pred provenancetypes.ProvenancePredicate
-		if err := json.Unmarshal(dt, &pred); err != nil {
+		var pred *provenancetypes.ProvenancePredicateSLSA1
+		if predType == slsa02.PredicateSLSAProvenance {
+			var pred02 *provenancetypes.ProvenancePredicateSLSA02
+			if err := json.Unmarshal(dt, &pred02); err != nil {
+				return errors.Errorf("failed to unmarshal provenance %s: %v", prov.descr.Digest, err)
+			}
+			pred = pred02.ConvertToSLSA1()
+		} else if err := json.Unmarshal(dt, &pred); err != nil {
 			return errors.Errorf("failed to unmarshal provenance %s: %v", prov.descr.Digest, err)
 		}
-		for _, m := range pred.Materials {
-			out.Materials = append(out.Materials, materialOutput{
-				URI:     m.URI,
-				Digests: digestSetToDigests(m.Digest),
-			})
+		if pred != nil {
+			for _, m := range pred.BuildDefinition.ResolvedDependencies {
+				out.Materials = append(out.Materials, materialOutput{
+					URI:     m.URI,
+					Digests: digestSetToDigests(m.Digest),
+				})
+			}
 		}
 	}
 
@@ -532,9 +523,10 @@ workers0:
 	}
 	fmt.Fprintf(tw, "Duration:\t%s%s\n", formatDuration(out.Duration), statusStr)
 
-	if out.Status == statusError {
+	switch out.Status {
+	case statusError:
 		fmt.Fprintf(tw, "Error:\t%s %s\n", codes.Code(rec.Error.Code).String(), rec.Error.Message)
-	} else if out.Status == statusCanceled {
+	case statusCanceled:
 		fmt.Fprintf(tw, "Status:\tCanceled\n")
 	}
 
@@ -655,7 +647,7 @@ func inspectCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "inspect [OPTIONS] [REF]",
-		Short: "Inspect a build",
+		Short: "Inspect a build record",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -664,7 +656,8 @@ func inspectCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 			options.builder = *rootOpts.Builder
 			return runInspect(cmd.Context(), dockerCli, options)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	cmd.AddCommand(
@@ -842,6 +835,7 @@ func ociDesc(in *controlapi.Descriptor) ocispecs.Descriptor {
 		Annotations: in.Annotations,
 	}
 }
+
 func descrType(desc ocispecs.Descriptor) string {
 	if typ, ok := desc.Annotations["in-toto.io/predicate-type"]; ok {
 		return typ
@@ -875,9 +869,9 @@ func printTable(w io.Writer, kvs []keyValueOutput, title string) {
 func readKeyValues(attrs map[string]string, prefix string) []keyValueOutput {
 	var out []keyValueOutput
 	for k, v := range attrs {
-		if strings.HasPrefix(k, prefix) {
+		if name, ok := strings.CutPrefix(k, prefix); ok {
 			out = append(out, keyValueOutput{
-				Name:  strings.TrimPrefix(k, prefix),
+				Name:  name,
 				Value: v,
 			})
 		}

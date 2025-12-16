@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/docker/cli/cli"
-	"github.com/docker/cli/cli-plugins/manager"
+	"github.com/docker/cli/cli-plugins/metadata"
 	"github.com/docker/cli/cli-plugins/socket"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/connhelper"
@@ -30,7 +30,7 @@ import (
 var PersistentPreRunE func(*cobra.Command, []string) error
 
 // RunPlugin executes the specified plugin command
-func RunPlugin(dockerCli *command.DockerCli, plugin *cobra.Command, meta manager.Metadata) error {
+func RunPlugin(dockerCli *command.DockerCli, plugin *cobra.Command, meta metadata.Metadata) error {
 	tcmd := newPluginCommand(dockerCli, plugin, meta)
 
 	var persistentPreRunOnce sync.Once
@@ -80,19 +80,23 @@ func RunPlugin(dockerCli *command.DockerCli, plugin *cobra.Command, meta manager
 	return cmd.Execute()
 }
 
-// Run is the top-level entry point to the CLI plugin framework. It should be called from your plugin's `main()` function.
-func Run(makeCmd func(command.Cli) *cobra.Command, meta manager.Metadata) {
+// Run is the top-level entry point to the CLI plugin framework. It should
+// be called from the plugin's "main()" function. It initializes a new
+// [command.DockerCli] instance with the given options before calling
+// makeCmd to construct the plugin command, then invokes the plugin command
+// using [RunPlugin].
+func Run(makeCmd func(command.Cli) *cobra.Command, meta metadata.Metadata, ops ...command.CLIOption) {
 	otel.SetErrorHandler(debug.OTELErrorHandler)
 
-	dockerCli, err := command.NewDockerCli()
+	dockerCLI, err := command.NewDockerCli(ops...)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	plugin := makeCmd(dockerCli)
+	plugin := makeCmd(dockerCLI)
 
-	if err := RunPlugin(dockerCli, plugin, meta); err != nil {
+	if err := RunPlugin(dockerCLI, plugin, meta); err != nil {
 		var stErr cli.StatusError
 		if errors.As(err, &stErr) {
 			// StatusError should only be used for errors, and all errors should
@@ -100,18 +104,18 @@ func Run(makeCmd func(command.Cli) *cobra.Command, meta manager.Metadata) {
 			if stErr.StatusCode == 0 { // FIXME(thaJeztah): this should never be used with a zero status-code. Check if we do this anywhere.
 				stErr.StatusCode = 1
 			}
-			_, _ = fmt.Fprintln(dockerCli.Err(), stErr)
+			_, _ = fmt.Fprintln(dockerCLI.Err(), stErr)
 			os.Exit(stErr.StatusCode)
 		}
-		_, _ = fmt.Fprintln(dockerCli.Err(), err)
+		_, _ = fmt.Fprintln(dockerCLI.Err(), err)
 		os.Exit(1)
 	}
 }
 
 func withPluginClientConn(name string) command.CLIOption {
-	return command.WithInitializeClient(func(dockerCli *command.DockerCli) (client.APIClient, error) {
+	return func(cli *command.DockerCli) error {
 		cmd := "docker"
-		if x := os.Getenv(manager.ReexecEnvvar); x != "" {
+		if x := os.Getenv(metadata.ReexecEnvvar); x != "" {
 			cmd = x
 		}
 		var flags []string
@@ -133,16 +137,19 @@ func withPluginClientConn(name string) command.CLIOption {
 
 		helper, err := connhelper.GetCommandConnectionHelper(cmd, flags...)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		return client.NewClientWithOpts(client.WithDialContext(helper.Dialer))
-	})
+		apiClient, err := client.NewClientWithOpts(client.WithDialContext(helper.Dialer))
+		if err != nil {
+			return err
+		}
+		return command.WithAPIClient(apiClient)(cli)
+	}
 }
 
-func newPluginCommand(dockerCli *command.DockerCli, plugin *cobra.Command, meta manager.Metadata) *cli.TopLevelCommand {
+func newPluginCommand(dockerCli *command.DockerCli, plugin *cobra.Command, meta metadata.Metadata) *cli.TopLevelCommand {
 	name := plugin.Name()
-	fullname := manager.NamePrefix + name
+	fullname := metadata.NamePrefix + name
 
 	cmd := &cobra.Command{
 		Use:           fmt.Sprintf("docker [OPTIONS] %s [ARG...]", name),
@@ -172,17 +179,30 @@ func newPluginCommand(dockerCli *command.DockerCli, plugin *cobra.Command, meta 
 		newMetadataSubcommand(plugin, meta),
 	)
 
-	cli.DisableFlagsInUseLine(cmd)
+	visitAll(cmd,
+		// prevent adding "[flags]" to the end of the usage line.
+		func(c *cobra.Command) { c.DisableFlagsInUseLine = true },
+	)
 
 	return cli.NewTopLevelCommand(cmd, dockerCli, opts, cmd.Flags())
 }
 
-func newMetadataSubcommand(plugin *cobra.Command, meta manager.Metadata) *cobra.Command {
+// visitAll traverses all commands from the root.
+func visitAll(root *cobra.Command, fns ...func(*cobra.Command)) {
+	for _, cmd := range root.Commands() {
+		visitAll(cmd, fns...)
+	}
+	for _, fn := range fns {
+		fn(root)
+	}
+}
+
+func newMetadataSubcommand(plugin *cobra.Command, meta metadata.Metadata) *cobra.Command {
 	if meta.ShortDescription == "" {
 		meta.ShortDescription = plugin.Short
 	}
 	cmd := &cobra.Command{
-		Use:    manager.MetadataSubcommandName,
+		Use:    metadata.MetadataSubcommandName,
 		Hidden: true,
 		// Suppress the global/parent PersistentPreRunE, which
 		// needlessly initializes the client and tries to
@@ -200,8 +220,8 @@ func newMetadataSubcommand(plugin *cobra.Command, meta manager.Metadata) *cobra.
 
 // RunningStandalone tells a CLI plugin it is run standalone by direct execution
 func RunningStandalone() bool {
-	if os.Getenv(manager.ReexecEnvvar) != "" {
+	if os.Getenv(metadata.ReexecEnvvar) != "" {
 		return false
 	}
-	return len(os.Args) < 2 || os.Args[1] != manager.MetadataSubcommandName
+	return len(os.Args) < 2 || os.Args[1] != metadata.MetadataSubcommandName
 }
