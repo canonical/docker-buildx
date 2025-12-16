@@ -19,6 +19,7 @@ import (
 	"github.com/docker/buildx/localstate"
 	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/gitutil"
+	"github.com/docker/buildx/util/gitutil/gittestutil"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/frontend/subrequests/lint"
 	"github.com/moby/buildkit/frontend/subrequests/outline"
@@ -75,7 +76,9 @@ var buildTests = []func(t *testing.T, sb integration.Sandbox){
 	testBuildSecret,
 	testBuildDefaultLoad,
 	testBuildCall,
-	testCheckCallOutput,
+	testBuildCheckCallOutput,
+	testBuildExtraHosts,
+	testBuildIndexAnnotationsLoadDocker,
 }
 
 func testBuild(t *testing.T, sb integration.Sandbox) {
@@ -112,28 +115,155 @@ COPY --from=base /etc/bar /bar
 }
 
 func testBuildRemote(t *testing.T, sb integration.Sandbox) {
-	dockerfile := []byte(`
+	t.Run("default branch", func(t *testing.T) {
+		dockerfile := []byte(`
 FROM busybox:latest
 COPY foo /foo
 `)
-	dir := tmpdir(
-		t,
-		fstest.CreateFile("Dockerfile", dockerfile, 0600),
-		fstest.CreateFile("foo", []byte("foo"), 0600),
-	)
-	dirDest := t.TempDir()
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+		dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dir))
-	require.NoError(t, err)
+		git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+		require.NoError(t, err)
 
-	gitutil.GitInit(git, t)
-	gitutil.GitAdd(git, t, "Dockerfile", "foo")
-	gitutil.GitCommit(git, t, "initial commit")
-	addr := gitutil.GitServeHTTP(git, t)
+		gittestutil.GitInit(git, t)
+		gittestutil.GitAdd(git, t, "Dockerfile", "foo")
+		gittestutil.GitCommit(git, t, "initial commit")
+		addr := gittestutil.GitServeHTTP(git, t)
 
-	out, err := buildCmd(sb, withDir(dir), withArgs("--output=type=local,dest="+dirDest, addr))
-	require.NoError(t, err, out)
-	require.FileExists(t, filepath.Join(dirDest, "foo"))
+		out, err := buildCmd(sb, withDir(dir), withArgs("--output=type=local,dest="+dirDest, addr))
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dirDest, "foo"))
+	})
+
+	t.Run("tag ref with url fragment", func(t *testing.T) {
+		dockerfile := []byte(`
+FROM busybox:latest
+COPY foo /foo
+`)
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+		require.NoError(t, err)
+
+		gittestutil.GitInit(git, t)
+		gittestutil.GitAdd(git, t, "Dockerfile", "foo")
+		gittestutil.GitCommit(git, t, "initial commit")
+		gittestutil.GitTag(git, t, "v0.1.0")
+		addr := gittestutil.GitServeHTTP(git, t)
+		addr = addr + "#v0.1.0" // tag
+
+		out, err := buildCmd(sb, withDir(dir), withArgs("--output=type=local,dest="+dirDest, addr))
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dirDest, "foo"))
+	})
+
+	t.Run("tag ref with query string", func(t *testing.T) {
+		dockerfile := []byte(`
+FROM busybox:latest
+COPY foo /foo
+`)
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+		require.NoError(t, err)
+
+		gittestutil.GitInit(git, t)
+		gittestutil.GitAdd(git, t, "Dockerfile", "foo")
+		gittestutil.GitCommit(git, t, "initial commit")
+		gittestutil.GitTag(git, t, "v0.1.0")
+		addr := gittestutil.GitServeHTTP(git, t)
+		addr = addr + "?tag=v0.1.0" // tag
+
+		out, err := buildCmd(sb, withDir(dir), withArgs("--output=type=local,dest="+dirDest, addr))
+		if matchesBuildKitVersion(t, sb, ">= 0.24.0-0") {
+			require.NoError(t, err, out)
+			require.FileExists(t, filepath.Join(dirDest, "foo"))
+		} else {
+			require.Error(t, err)
+			require.Contains(t, out, "current frontend does not support Git URLs with query string components")
+		}
+	})
+
+	t.Run("tag ref with query string frontend 1.17", func(t *testing.T) {
+		dockerfile := []byte(`
+# syntax=docker/dockerfile:1.17
+FROM busybox:latest
+COPY foo /foo
+`)
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+		require.NoError(t, err)
+
+		gittestutil.GitInit(git, t)
+		gittestutil.GitAdd(git, t, "Dockerfile", "foo")
+		gittestutil.GitCommit(git, t, "initial commit")
+		gittestutil.GitTag(git, t, "v0.1.0")
+		addr := gittestutil.GitServeHTTP(git, t)
+		addr = addr + "?tag=v0.1.0" // tag
+
+		out, err := buildCmd(sb, withDir(dir), withArgs("--output=type=local,dest="+dirDest, addr))
+		if matchesBuildKitVersion(t, sb, ">= 0.24.0-0") {
+			require.NoError(t, err, out)
+			require.FileExists(t, filepath.Join(dirDest, "foo"))
+		} else {
+			require.Error(t, err)
+			require.Contains(t, out, "current frontend does not support Git URLs with query string components")
+		}
+	})
+
+	t.Run("tag ref with query string frontend 1.18.0", func(t *testing.T) {
+		dockerfile := []byte(`
+# syntax=docker/dockerfile-upstream:1.18.0
+FROM busybox:latest
+COPY foo /foo
+`)
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+		require.NoError(t, err)
+
+		gittestutil.GitInit(git, t)
+		gittestutil.GitAdd(git, t, "Dockerfile", "foo")
+		gittestutil.GitCommit(git, t, "initial commit")
+		gittestutil.GitTag(git, t, "v0.1.0")
+		addr := gittestutil.GitServeHTTP(git, t)
+		addr = addr + "?tag=v0.1.0" // tag
+
+		out, err := buildCmd(sb, withDir(dir), withArgs("--output=type=local,dest="+dirDest, addr))
+		if matchesBuildKitVersion(t, sb, ">= 0.24.0-0") {
+			require.NoError(t, err, out)
+			require.FileExists(t, filepath.Join(dirDest, "foo"))
+		} else {
+			require.Error(t, err)
+			require.Contains(t, out, "current frontend does not support Git URLs with query string components")
+		}
+	})
 }
 
 func testBuildLocalState(t *testing.T, sb integration.Sandbox) {
@@ -238,10 +368,10 @@ COPY foo /foo
 	git, err := gitutil.New(gitutil.WithWorkingDir(dir))
 	require.NoError(t, err)
 
-	gitutil.GitInit(git, t)
-	gitutil.GitAdd(git, t, "build.Dockerfile", "foo")
-	gitutil.GitCommit(git, t, "initial commit")
-	addr := gitutil.GitServeHTTP(git, t)
+	gittestutil.GitInit(git, t)
+	gittestutil.GitAdd(git, t, "build.Dockerfile", "foo")
+	gittestutil.GitCommit(git, t, "initial commit")
+	addr := gittestutil.GitServeHTTP(git, t)
 
 	out, err := buildCmd(sb, withDir(dir), withArgs(
 		"-f", "build.Dockerfile",
@@ -287,10 +417,11 @@ func testBuildLocalExport(t *testing.T, sb integration.Sandbox) {
 
 func testBuildTarExport(t *testing.T, sb integration.Sandbox) {
 	dir := createTestProject(t)
-	out, err := buildCmd(sb, withArgs(fmt.Sprintf("--output=type=tar,dest=%s/result.tar", dir), dir))
+	outdir := path.Join(dir, "out")
+	out, err := buildCmd(sb, withArgs(fmt.Sprintf("--output=type=tar,dest=%s/result.tar", outdir), dir))
 	require.NoError(t, err, string(out))
 
-	dt, err := os.ReadFile(fmt.Sprintf("%s/result.tar", dir))
+	dt, err := os.ReadFile(fmt.Sprintf("%s/result.tar", outdir))
 	require.NoError(t, err)
 	m, err := testutil.ReadTarToMap(dt, false)
 	require.NoError(t, err)
@@ -398,18 +529,25 @@ func testImageIDOutput(t *testing.T, sb integration.Sandbox) {
 
 	require.Equal(t, dgst.String(), strings.TrimSpace(stdout.String()))
 
+	// read the md.json file
 	dt, err = os.ReadFile(filepath.Join(targetDir, "md.json"))
 	require.NoError(t, err)
 
 	type mdT struct {
+		Digest       string `json:"containerimage.digest"`
 		ConfigDigest string `json:"containerimage.config.digest"`
 	}
+
 	var md mdT
 	err = json.Unmarshal(dt, &md)
 	require.NoError(t, err)
 
 	require.NotEmpty(t, md.ConfigDigest)
-	require.Equal(t, dgst, digest.Digest(md.ConfigDigest))
+	require.NotEmpty(t, md.Digest)
+
+	// verify the image ID output is correct
+	// XXX: improve this by checking that it's one of the two expected digests depending on the scenario.
+	require.Contains(t, []digest.Digest{digest.Digest(md.ConfigDigest), digest.Digest(md.Digest)}, dgst)
 }
 
 func testBuildMobyFromLocalImage(t *testing.T, sb integration.Sandbox) {
@@ -510,7 +648,10 @@ func testBuildProgress(t *testing.T, sb integration.Sandbox) {
 
 	// progress=tty
 	cmd := buildxCmd(sb, withArgs("build", "--progress=tty", "--output=type=cacheonly", dir))
-	f, err := pty.Start(cmd)
+	f, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Cols: 120,
+		Rows: 24,
+	})
 	require.NoError(t, err)
 	buf := bytes.NewBuffer(nil)
 	io.Copy(buf, f)
@@ -804,8 +945,8 @@ func buildMetadataProvenance(t *testing.T, sb integration.Sandbox, metadataMode 
 	require.NoError(t, err)
 
 	type mdT struct {
-		BuildRef        string                 `json:"buildx.build.ref"`
-		BuildProvenance map[string]interface{} `json:"buildx.build.provenance"`
+		BuildRef        string         `json:"buildx.build.ref"`
+		BuildProvenance map[string]any `json:"buildx.build.provenance"`
 	}
 	var md mdT
 	err = json.Unmarshal(dt, &md)
@@ -821,9 +962,9 @@ func buildMetadataProvenance(t *testing.T, sb integration.Sandbox, metadataMode 
 	dtprv, err := json.Marshal(md.BuildProvenance)
 	require.NoError(t, err)
 
-	var prv provenancetypes.ProvenancePredicate
+	var prv provenancetypes.ProvenancePredicateSLSA02
 	require.NoError(t, json.Unmarshal(dtprv, &prv))
-	require.Equal(t, provenancetypes.BuildKitBuildType, prv.BuildType)
+	require.Equal(t, provenancetypes.BuildKitBuildType02, prv.BuildType)
 }
 
 func testBuildMetadataWarnings(t *testing.T, sb integration.Sandbox) {
@@ -1229,7 +1370,7 @@ COPy --from=base \
 	})
 }
 
-func testCheckCallOutput(t *testing.T, sb integration.Sandbox) {
+func testBuildCheckCallOutput(t *testing.T, sb integration.Sandbox) {
 	t.Run("check for warning count msg in check without warnings", func(t *testing.T) {
 		dockerfile := []byte(`
 FROM busybox AS base
@@ -1309,6 +1450,35 @@ cOpy Dockerfile .
 		require.Contains(t, stdout.String(), dockerfilePath+":2")
 		require.Contains(t, stdout.String(), dockerfilePath+":3")
 	})
+}
+
+func testBuildExtraHosts(t *testing.T, sb integration.Sandbox) {
+	dockerfile := []byte(`
+FROM busybox
+RUN cat /etc/hosts | grep myhost | grep 1.2.3.4
+RUN cat /etc/hosts | grep myhostmulti | grep 162.242.195.81
+RUN cat /etc/hosts | grep myhostmulti | grep 162.242.195.82
+`)
+	dir := tmpdir(t, fstest.CreateFile("Dockerfile", dockerfile, 0600))
+	cmd := buildxCmd(sb, withArgs("build",
+		"--add-host=myhost=1.2.3.4",
+		"--add-host=myhostmulti=162.242.195.81",
+		"--add-host=myhostmulti=162.242.195.82",
+		"--output=type=cacheonly", dir),
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+}
+
+func testBuildIndexAnnotationsLoadDocker(t *testing.T, sb integration.Sandbox) {
+	if sb.DockerAddress() == "" {
+		t.Skip("only testing with docker available")
+	}
+	skipNoCompatBuildKit(t, sb, ">= 0.11.0-0", "annotations")
+	dir := createTestProject(t)
+	out, err := buildCmd(sb, withArgs("--annotation", "index:foo=bar", "--provenance", "false", "--output", "type=docker", dir))
+	require.Error(t, err, out)
+	require.Contains(t, out, "index annotations not supported for single platform export")
 }
 
 func createTestProject(t *testing.T) string {

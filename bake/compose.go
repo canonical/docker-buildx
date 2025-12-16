@@ -11,12 +11,13 @@ import (
 	"github.com/compose-spec/compose-go/v2/consts"
 	"github.com/compose-spec/compose-go/v2/dotenv"
 	"github.com/compose-spec/compose-go/v2/loader"
+	composeschema "github.com/compose-spec/compose-go/v2/schema"
 	composetypes "github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/buildx/util/buildflags"
 	dockeropts "github.com/docker/cli/opts"
 	"github.com/docker/go-units"
 	"github.com/pkg/errors"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 func ParseComposeFiles(fs []File) (*Config, error) {
@@ -35,21 +36,7 @@ func ParseComposeFiles(fs []File) (*Config, error) {
 }
 
 func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Config, error) {
-	if envs == nil {
-		envs = make(map[string]string)
-	}
-	cfg, err := loader.LoadWithContext(context.Background(), composetypes.ConfigDetails{
-		ConfigFiles: cfgs,
-		Environment: envs,
-	}, func(options *loader.Options) {
-		projectName := "bake"
-		if v, ok := envs[consts.ComposeProjectName]; ok && v != "" {
-			projectName = v
-		}
-		options.SetProjectName(projectName, false)
-		options.SkipNormalization = true
-		options.Profiles = []string{"*"}
-	})
+	cfg, err := loadComposeFiles(cfgs, envs)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +49,6 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 		g := &Group{Name: "default"}
 
 		for _, s := range cfg.Services {
-			s := s
 			if s.Build == nil {
 				continue
 			}
@@ -90,10 +76,7 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 
 			var additionalContexts map[string]string
 			if s.Build.AdditionalContexts != nil {
-				additionalContexts = map[string]string{}
-				for k, v := range s.Build.AdditionalContexts {
-					additionalContexts[k] = v
-				}
+				additionalContexts = composeToBuildkitNamedContexts(s.Build.AdditionalContexts)
 			}
 
 			var shmSize *string
@@ -120,6 +103,14 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 				}
 			}
 
+			extraHosts := map[string]*string{}
+			if s.Build.ExtraHosts != nil {
+				for k, v := range s.Build.ExtraHosts {
+					vv := strings.Join(v, ",")
+					extraHosts[k] = &vv
+				}
+			}
+
 			var ssh []*buildflags.SSH
 			for _, bkey := range s.Build.SSH {
 				sshkey := composeToBuildkitSSH(bkey)
@@ -141,7 +132,6 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 			// compose does not support nil values for labels
 			labels := map[string]*string{}
 			for k, v := range s.Build.Labels {
-				v := v
 				labels[k] = &v
 			}
 
@@ -153,6 +143,28 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 			cacheTo, err := buildflags.ParseCacheEntry(s.Build.CacheTo)
 			if err != nil {
 				return nil, err
+			}
+
+			var inAttests []string
+			if s.Build.SBOM != "" {
+				inAttests = append(inAttests, buildflags.CanonicalizeAttest("sbom", s.Build.SBOM))
+			}
+			if s.Build.Provenance != "" {
+				inAttests = append(inAttests, buildflags.CanonicalizeAttest("provenance", s.Build.Provenance))
+			}
+			attests, err := buildflags.ParseAttests(inAttests)
+			if err != nil {
+				return nil, err
+			}
+
+			var noCache *bool
+			if s.Build.NoCache {
+				noCache = &s.Build.NoCache
+			}
+
+			var pull *bool
+			if s.Build.Pull {
+				pull = &s.Build.Pull
 			}
 
 			g.Targets = append(g.Targets, targetName)
@@ -174,10 +186,15 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 				CacheFrom:   cacheFrom,
 				CacheTo:     cacheTo,
 				NetworkMode: networkModeP,
+				Platforms:   s.Build.Platforms,
 				SSH:         ssh,
 				Secrets:     secrets,
 				ShmSize:     shmSize,
 				Ulimits:     ulimits,
+				ExtraHosts:  extraHosts,
+				Attest:      attests,
+				NoCache:     noCache,
+				Pull:        pull,
 			}
 			if err = t.composeExtTarget(s.Build.Extensions); err != nil {
 				return nil, err
@@ -197,10 +214,74 @@ func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Conf
 	return &c, nil
 }
 
+func loadComposeFiles(cfgs []composetypes.ConfigFile, envs map[string]string, options ...func(*loader.Options)) (*composetypes.Project, error) {
+	if envs == nil {
+		envs = make(map[string]string)
+	}
+
+	cfgDetails := composetypes.ConfigDetails{
+		ConfigFiles: cfgs,
+		Environment: envs,
+	}
+
+	raw, err := loader.LoadModelWithContext(context.Background(), cfgDetails, append([]func(*loader.Options){func(opts *loader.Options) {
+		projectName := "bake"
+		if v, ok := envs[consts.ComposeProjectName]; ok && v != "" {
+			projectName = v
+		}
+		opts.SetProjectName(projectName, false)
+		opts.SkipNormalization = true
+		opts.SkipValidation = true
+	}}, options...)...)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make(map[string]any)
+	for _, key := range []string{"services", "secrets"} {
+		if key == "services" {
+			if services, ok := raw["services"].(map[string]any); ok {
+				filteredServices := make(map[string]any)
+				for svcName, svc := range services {
+					if svc == nil {
+						filteredServices[svcName] = map[string]any{}
+					} else if svcMap, ok := svc.(map[string]any); ok {
+						filteredService := make(map[string]any)
+						for _, svcField := range []string{"image", "build", "environment", "env_file"} {
+							if val, ok := svcMap[svcField]; ok {
+								filteredService[svcField] = val
+							}
+						}
+						filteredServices[svcName] = filteredService
+					}
+				}
+				filtered["services"] = filteredServices
+			}
+		} else if v, ok := raw[key]; ok {
+			filtered[key] = v
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, errors.New("empty compose file")
+	}
+
+	if err := composeschema.Validate(filtered); err != nil {
+		return nil, err
+	}
+
+	return loader.ModelToProject(filtered, loader.ToOptions(&cfgDetails, append([]func(*loader.Options){func(options *loader.Options) {
+		options.SkipNormalization = true
+		options.Profiles = []string{"*"}
+	}}, options...)), composetypes.ConfigDetails{
+		ConfigFiles: cfgs,
+		Environment: envs,
+	})
+}
+
 func validateComposeFile(dt []byte, fn string) (bool, error) {
 	envs, err := composeEnv()
 	if err != nil {
-		return true, err
+		return false, err
 	}
 	fnl := strings.ToLower(fn)
 	if strings.HasSuffix(fnl, ".yml") || strings.HasSuffix(fnl, ".yaml") {
@@ -214,16 +295,7 @@ func validateComposeFile(dt []byte, fn string) (bool, error) {
 }
 
 func validateCompose(dt []byte, envs map[string]string) error {
-	_, err := loader.Load(composetypes.ConfigDetails{
-		ConfigFiles: []composetypes.ConfigFile{
-			{
-				Content: dt,
-			},
-		},
-		Environment: envs,
-	}, func(options *loader.Options) {
-		options.SetProjectName("bake", false)
-		options.SkipNormalization = true
+	_, err := loadComposeFiles([]composetypes.ConfigFile{{Content: dt}}, envs, func(options *loader.Options) {
 		// consistency is checked later in ParseCompose to ensure multiple
 		// compose files can be merged together
 		options.SkipConsistencyCheck = true
@@ -252,10 +324,13 @@ func loadDotEnv(curenv map[string]string, workingDir string) (map[string]string,
 		return nil, err
 	}
 
-	if _, err = os.Stat(ef); os.IsNotExist(err) {
-		return curenv, nil
-	} else if err != nil {
+	if st, err := os.Stat(ef); err != nil {
+		if os.IsNotExist(err) {
+			return curenv, nil
+		}
 		return nil, err
+	} else if st.IsDir() {
+		return curenv, nil
 	}
 
 	dt, err := os.ReadFile(ef)
@@ -263,7 +338,10 @@ func loadDotEnv(curenv map[string]string, workingDir string) (map[string]string,
 		return nil, err
 	}
 
-	envs, err := dotenv.UnmarshalBytesWithLookup(dt, nil)
+	envs, err := dotenv.UnmarshalBytesWithLookup(dt, func(k string) (string, bool) {
+		v, ok := curenv[k]
+		return v, ok
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +393,7 @@ type (
 	stringArray []string
 )
 
-func (sa *stringArray) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (sa *stringArray) UnmarshalYAML(unmarshal func(any) error) error {
 	var multi []string
 	err := unmarshal(&multi)
 	if err != nil {
@@ -332,7 +410,7 @@ func (sa *stringArray) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // composeExtTarget converts Compose build extension x-bake to bake Target
 // https://github.com/compose-spec/compose-spec/blob/master/spec.md#extension
-func (t *Target) composeExtTarget(exts map[string]interface{}) error {
+func (t *Target) composeExtTarget(exts map[string]any) error {
 	var xb xbake
 
 	ext, ok := exts["x-bake"]
@@ -399,7 +477,7 @@ func (t *Target) composeExtTarget(exts map[string]interface{}) error {
 		t.NoCacheFilter = dedupSlice(append(t.NoCacheFilter, xb.NoCacheFilter...))
 	}
 	if len(xb.Contexts) > 0 {
-		t.Contexts = dedupMap(t.Contexts, xb.Contexts)
+		t.Contexts = dedupMap(t.Contexts, composeToBuildkitNamedContexts(xb.Contexts))
 	}
 
 	return nil
@@ -433,4 +511,17 @@ func composeToBuildkitSSH(sshKey composetypes.SSHKey) *buildflags.SSH {
 		bkssh.Paths = []string{sshKey.Path}
 	}
 	return bkssh
+}
+
+func composeToBuildkitNamedContexts(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if strings.HasPrefix(v, "service:") || strings.HasPrefix(v, "target:") {
+			if parts := strings.SplitN(v, ":", 2); len(parts) == 2 {
+				v = "target:" + sanitizeTargetName(parts[1])
+			}
+		}
+		out[k] = v
+	}
+	return out
 }

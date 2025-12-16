@@ -13,25 +13,25 @@ Build from a file
 
 ### Options
 
-| Name                                | Type          | Default | Description                                                                                                  |
-|:------------------------------------|:--------------|:--------|:-------------------------------------------------------------------------------------------------------------|
-| [`--allow`](#allow)                 | `stringArray` |         | Allow build to access specified resources                                                                    |
-| [`--builder`](#builder)             | `string`      |         | Override the configured builder instance                                                                     |
-| [`--call`](#call)                   | `string`      | `build` | Set method for evaluating build (`check`, `outline`, `targets`)                                              |
-| [`--check`](#check)                 | `bool`        |         | Shorthand for `--call=check`                                                                                 |
-| `-D`, `--debug`                     | `bool`        |         | Enable debug logging                                                                                         |
-| [`-f`](#file), [`--file`](#file)    | `stringArray` |         | Build definition file                                                                                        |
-| [`--list`](#list)                   | `string`      |         | List targets or variables                                                                                    |
-| `--load`                            | `bool`        |         | Shorthand for `--set=*.output=type=docker`                                                                   |
-| [`--metadata-file`](#metadata-file) | `string`      |         | Write build result metadata to a file                                                                        |
-| [`--no-cache`](#no-cache)           | `bool`        |         | Do not use cache when building the image                                                                     |
-| [`--print`](#print)                 | `bool`        |         | Print the options without building                                                                           |
-| [`--progress`](#progress)           | `string`      | `auto`  | Set type of progress output (`auto`, `quiet`, `plain`, `tty`, `rawjson`). Use plain to show container output |
-| [`--provenance`](#provenance)       | `string`      |         | Shorthand for `--set=*.attest=type=provenance`                                                               |
-| [`--pull`](#pull)                   | `bool`        |         | Always attempt to pull all referenced images                                                                 |
-| `--push`                            | `bool`        |         | Shorthand for `--set=*.output=type=registry`                                                                 |
-| [`--sbom`](#sbom)                   | `string`      |         | Shorthand for `--set=*.attest=type=sbom`                                                                     |
-| [`--set`](#set)                     | `stringArray` |         | Override target value (e.g., `targetpattern.key=value`)                                                      |
+| Name                                | Type          | Default | Description                                                                                                           |
+|:------------------------------------|:--------------|:--------|:----------------------------------------------------------------------------------------------------------------------|
+| [`--allow`](#allow)                 | `stringArray` |         | Allow build to access specified resources                                                                             |
+| [`--builder`](#builder)             | `string`      |         | Override the configured builder instance                                                                              |
+| [`--call`](#call)                   | `string`      | `build` | Set method for evaluating build (`check`, `outline`, `targets`)                                                       |
+| [`--check`](#check)                 | `bool`        |         | Shorthand for `--call=check`                                                                                          |
+| `-D`, `--debug`                     | `bool`        |         | Enable debug logging                                                                                                  |
+| [`-f`](#file), [`--file`](#file)    | `stringArray` |         | Build definition file                                                                                                 |
+| [`--list`](#list)                   | `string`      |         | List targets or variables                                                                                             |
+| [`--load`](#load)                   | `bool`        |         | Shorthand for `--set=*.output=type=docker`. Conditional.                                                              |
+| [`--metadata-file`](#metadata-file) | `string`      |         | Write build result metadata to a file                                                                                 |
+| [`--no-cache`](#no-cache)           | `bool`        |         | Do not use cache when building the image                                                                              |
+| [`--print`](#print)                 | `bool`        |         | Print the options without building                                                                                    |
+| [`--progress`](#progress)           | `string`      | `auto`  | Set type of progress output (`auto`, `none`,  `plain`, `quiet`, `rawjson`, `tty`). Use plain to show container output |
+| [`--provenance`](#provenance)       | `string`      |         | Shorthand for `--set=*.attest=type=provenance`                                                                        |
+| [`--pull`](#pull)                   | `bool`        |         | Always attempt to pull all referenced images                                                                          |
+| [`--push`](#push)                   | `bool`        |         | Shorthand for `--set=*.output=type=registry`. Conditional.                                                            |
+| [`--sbom`](#sbom)                   | `string`      |         | Shorthand for `--set=*.attest=type=sbom`                                                                              |
+| [`--set`](#set)                     | `stringArray` |         | Override target value (e.g., `targetpattern.key=value`)                                                               |
 
 
 <!---MARKER_GEN_END-->
@@ -65,7 +65,7 @@ entitlements, making it clear when a build or bake operation requires elevated
 privileges.
 
 In addition to BuildKit's `network.host` and `security.insecure` entitlements
-(see [`docker buildx build --allow`](https://docs.docker.com/reference/cli/docker/buildx/build/#allow),
+(see [`docker buildx build --allow`](https://docs.docker.com/reference/cli/docker/buildx/build/#allow)),
 Bake supports file system entitlements that grant granular control over file
 system access. These are particularly useful when working with builds that need
 access to files outside the default working directory.
@@ -143,6 +143,11 @@ Use the `-f` / `--file` option to specify the build definition file to use.
 The file can be an HCL, JSON or Compose file. If multiple files are specified,
 all are read and the build configurations are combined.
 
+Alternatively, the environment variable `BUILDX_BAKE_FILE` can be used to specify the build definition to use.
+This is mutually exclusive with `-f` / `--file`; if both are specified, the environment variable is ignored.
+Multiple definitions can be specified by separating them with the system's path separator
+(typically `;` on Windows and `:` elsewhere), but can be changed with `BUILDX_BAKE_PATH_SEPARATOR`.
+
 You can pass the names of the targets to build, to build only specific target(s).
 The following example builds the `db` and `webapp-release` targets that are
 defined in the `docker-bake.dev.hcl` file:
@@ -198,11 +203,14 @@ To list variables:
 
 ```console
 $ docker buildx bake --list=variables
-VARIABLE      VALUE                DESCRIPTION
-REGISTRY      docker.io/username   Registry and namespace
-IMAGE_NAME    my-app               Image name
-GO_VERSION    <null>
+VARIABLE      TYPE      VALUE                DESCRIPTION
+REGISTRY      string    docker.io/username   Registry and namespace
+IMAGE_NAME    string    my-app               Image name
+GO_VERSION              <null>
+DEBUG         bool      false                Add debug symbols
 ```
+
+Variable types will be shown when set using the `type` property in the Bake file.
 
 By default, the output of `docker buildx bake --list` is presented in a table
 format. Alternatively, you can use a long-form CSV syntax and specify a
@@ -211,6 +219,47 @@ format. Alternatively, you can use a long-form CSV syntax and specify a
 ```console
 $ docker buildx bake --list=type=targets,format=json
 ```
+
+### <a name="load"></a> Load images into Docker (--load)
+
+The `--load` flag is a convenience shorthand for adding an image export of type 
+`docker`:
+
+```console
+--load   ≈   --set=*.output=type=docker
+```
+
+However, its behavior is conditional:
+
+- If the build definition has no output defined, `--load` adds
+`type=docker`.
+- If the build definition’s outputs are `docker`, `image`, `registry`,
+`oci`, `--load` will add a `type=docker` export if one is not already present.
+- If the build definition contains `local` or `tar` outputs,
+`--load` does nothing. It will not override those outputs.
+
+For example, with the following bake file:
+
+```hcl
+target "default" {
+  output = ["type=tar,dest=hi.tar"]
+}
+```
+
+With `--load`:
+
+```console
+$ docker buildx bake --load --print
+...
+"output": [
+  { 
+    "dest": "hi.tar"
+    "type": "tar",
+   }
+]
+```
+
+The `tar` output remains unchanged.
 
 ### <a name="metadata-file"></a> Write build results metadata to a file (--metadata-file)
 
@@ -331,6 +380,14 @@ Same as [`build --provenance`](buildx_build.md#provenance).
 
 Same as `build --pull`.
 
+### <a name="push"></a> Push images to a registry (--push)
+
+The `--push` flag follows the same logic as `--load`:
+
+- If no outputs are defined, it adds a `type=image,push=true` export.
+- For existing `image` outputs, it sets `push=true`.
+- If outputs are set to `local` or `tar`, it does not override them.
+
 ### <a name="sbom"></a> Create SBOM attestations (--sbom)
 
 Same as [`build --sbom`](buildx_build.md#sbom).
@@ -347,18 +404,31 @@ is defined in https://golang.org/pkg/path/#Match.
 ```console
 $ docker buildx bake --set target.args.mybuildarg=value
 $ docker buildx bake --set target.platform=linux/arm64
-$ docker buildx bake --set foo*.args.mybuildarg=value # overrides build arg for all targets starting with 'foo'
-$ docker buildx bake --set *.platform=linux/arm64     # overrides platform for all targets
-$ docker buildx bake --set foo*.no-cache              # bypass caching only for targets starting with 'foo'
+$ docker buildx bake --set foo*.args.mybuildarg=value   # overrides build arg for all targets starting with 'foo'
+$ docker buildx bake --set *.platform=linux/arm64       # overrides platform for all targets
+$ docker buildx bake --set foo*.no-cache                # bypass caching only for targets starting with 'foo'
+$ docker buildx bake --set target.platform+=linux/arm64 # appends 'linux/arm64' to the platform list
 ```
+
+> [!NOTE]
+>
+> `--set` is a repeatable flag. For array fields such as `tags`, repeat `--set`
+> to provide multiple values or use the `+=` operator to append without
+> replacing. Array literal syntax like `--set target.tags=[a,b]` is not
+> supported.
 
 You can override the following fields:
 
+* `annotations`
+* `attest`
 * `args`
 * `cache-from`
 * `cache-to`
+* `call`
 * `context`
 * `dockerfile`
+* `entitlements`
+* `extra-hosts`
 * `labels`
 * `load`
 * `no-cache`
@@ -371,3 +441,20 @@ You can override the following fields:
 * `ssh`
 * `tags`
 * `target`
+
+You can append using `+=` operator for the following fields:
+
+* `annotations`¹
+* `attest`¹
+* `cache-from`
+* `cache-to`
+* `entitlements`¹
+* `no-cache-filter`
+* `output`
+* `platform`
+* `secrets`
+* `ssh`
+* `tags`
+
+> [!NOTE]
+> ¹ These fields already append by default.

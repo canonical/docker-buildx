@@ -22,7 +22,7 @@ import (
 // This uses the tags on the fields of the struct to discover how each
 // field's value should be expressed within configuration. If an invalid
 // mapping is attempted, this function will panic.
-func ImpliedBodySchema(val interface{}) (schema *hcl.BodySchema, partial bool) {
+func ImpliedBodySchema(val any) (schema *hcl.BodySchema, partial bool) {
 	ty := reflect.TypeOf(val)
 
 	if ty.Kind() == reflect.Ptr {
@@ -52,8 +52,7 @@ func ImpliedBodySchema(val interface{}) (schema *hcl.BodySchema, partial bool) {
 
 		switch {
 		case field.Type.AssignableTo(exprType):
-			//nolint:misspell
-			// If we're decoding to hcl.Expression then absense can be
+			// If we're decoding to hcl.Expression then absence can be
 			// indicated via a null value, so we don't specify that
 			// the field is required during decoding.
 			required = false
@@ -134,7 +133,7 @@ func getFieldTags(ty reflect.Type) *fieldTags {
 	}
 
 	ct := ty.NumField()
-	for i := 0; i < ct; i++ {
+	for i := range ct {
 		field := ty.Field(i)
 		tag := field.Tag.Get("hcl")
 		if tag == "" {

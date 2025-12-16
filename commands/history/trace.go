@@ -8,9 +8,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/containerd/console"
@@ -20,7 +17,6 @@ import (
 	"github.com/docker/buildx/util/otelutil"
 	"github.com/docker/buildx/util/otelutil/jaeger"
 	"github.com/docker/cli/cli/command"
-	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/browser"
@@ -37,51 +33,20 @@ type traceOptions struct {
 }
 
 func loadTrace(ctx context.Context, ref string, nodes []builder.Node) (string, []byte, error) {
-	var offset *int
-	if strings.HasPrefix(ref, "^") {
-		off, err := strconv.Atoi(ref[1:])
-		if err != nil {
-			return "", nil, errors.Wrapf(err, "invalid offset %q", ref)
-		}
-		offset = &off
-		ref = ""
-	}
-
-	recs, err := queryRecords(ctx, ref, nodes)
+	recs, err := queryRecords(ctx, ref, nodes, &queryOptions{
+		CompletedOnly: true,
+	})
 	if err != nil {
 		return "", nil, err
 	}
 
-	var rec *historyRecord
-
-	if ref == "" {
-		slices.SortFunc(recs, func(a, b historyRecord) int {
-			return b.CreatedAt.AsTime().Compare(a.CreatedAt.AsTime())
-		})
-		for _, r := range recs {
-			if r.CompletedAt != nil {
-				if offset != nil {
-					if *offset > 0 {
-						*offset--
-						continue
-					}
-				}
-				rec = &r
-				break
-			}
-		}
-		if offset != nil && *offset > 0 {
-			return "", nil, errors.Errorf("no completed build found with offset %d", *offset)
-		}
-	} else {
-		rec = &recs[0]
-	}
-	if rec == nil {
+	if len(recs) == 0 {
 		if ref == "" {
 			return "", nil, errors.New("no records found")
 		}
 		return "", nil, errors.Errorf("no record found for ref %q", ref)
 	}
+	rec := &recs[0]
 
 	if rec.CompletedAt == nil {
 		return "", nil, errors.Errorf("build %q is not completed, only completed builds can be traced", rec.Ref)
@@ -91,19 +56,14 @@ func loadTrace(ctx context.Context, ref string, nodes []builder.Node) (string, [
 		// build is complete but no trace yet. try to finalize the trace
 		time.Sleep(1 * time.Second) // give some extra time for last parts of trace to be written
 
-		c, err := rec.node.Driver.Client(ctx)
-		if err != nil {
-			return "", nil, err
-		}
-		_, err = c.ControlClient().UpdateBuildHistory(ctx, &controlapi.UpdateBuildHistoryRequest{
-			Ref:      rec.Ref,
-			Finalize: true,
-		})
+		err := finalizeRecord(ctx, rec.Ref, []builder.Node{*rec.node})
 		if err != nil {
 			return "", nil, err
 		}
 
-		recs, err := queryRecords(ctx, rec.Ref, []builder.Node{*rec.node})
+		recs, err := queryRecords(ctx, rec.Ref, []builder.Node{*rec.node}, &queryOptions{
+			CompletedOnly: true,
+		})
 		if err != nil {
 			return "", nil, err
 		}
@@ -160,19 +120,9 @@ func loadTrace(ctx context.Context, ref string, nodes []builder.Node) (string, [
 }
 
 func runTrace(ctx context.Context, dockerCli command.Cli, opts traceOptions) error {
-	b, err := builder.New(dockerCli, builder.WithName(opts.builder))
+	nodes, err := loadNodes(ctx, dockerCli, opts.builder)
 	if err != nil {
 		return err
-	}
-
-	nodes, err := b.LoadNodes(ctx)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if node.Err != nil {
-			return node.Err
-		}
 	}
 
 	traceID, data, err := loadTrace(ctx, opts.ref, nodes)
@@ -249,12 +199,13 @@ func traceCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 			options.builder = *rootOpts.Builder
 			return runTrace(cmd.Context(), dockerCli, options)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
 	flags.StringVar(&options.addr, "addr", "127.0.0.1:0", "Address to bind the UI server")
-	flags.StringVar(&options.compare, "compare", "", "Compare with another build reference")
+	flags.StringVar(&options.compare, "compare", "", "Compare with another build record")
 
 	return cmd
 }

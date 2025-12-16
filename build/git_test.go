@@ -9,25 +9,26 @@ import (
 	"testing"
 
 	"github.com/docker/buildx/util/gitutil"
+	"github.com/docker/buildx/util/gitutil/gittestutil"
 	"github.com/moby/buildkit/client"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func setupTest(tb testing.TB) {
-	gitutil.Mktmp(tb)
+	gittestutil.Mktmp(tb)
 
 	c, err := gitutil.New()
 	require.NoError(tb, err)
-	gitutil.GitInit(c, tb)
+	gittestutil.GitInit(c, tb)
 
 	df := []byte("FROM alpine:latest\n")
 	require.NoError(tb, os.WriteFile("Dockerfile", df, 0644))
 
-	gitutil.GitAdd(c, tb, "Dockerfile")
-	gitutil.GitCommit(c, tb, "initial commit")
-	gitutil.GitSetRemote(c, tb, "origin", "git@github.com:docker/buildx.git")
+	gittestutil.GitAdd(c, tb, "Dockerfile")
+	gittestutil.GitCommit(c, tb, "initial commit")
+	gittestutil.GitSetRemote(c, tb, "origin", "git@github.com:docker/buildx.git")
 }
 
 func TestGetGitAttributesNotGitRepo(t *testing.T) {
@@ -90,8 +91,8 @@ func TestGetGitAttributes(t *testing.T) {
 			envGitInfo:   "false",
 			expected: []string{
 				"label:" + DockerfileLabel,
-				"label:" + specs.AnnotationRevision,
-				"label:" + specs.AnnotationSource,
+				"label:" + ocispecs.AnnotationRevision,
+				"label:" + ocispecs.AnnotationSource,
 			},
 		},
 		{
@@ -100,15 +101,14 @@ func TestGetGitAttributes(t *testing.T) {
 			envGitInfo:   "",
 			expected: []string{
 				"label:" + DockerfileLabel,
-				"label:" + specs.AnnotationRevision,
-				"label:" + specs.AnnotationSource,
+				"label:" + ocispecs.AnnotationRevision,
+				"label:" + ocispecs.AnnotationSource,
 				"vcs:revision",
 				"vcs:source",
 			},
 		},
 	}
 	for _, tt := range cases {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			setupTest(t)
 			if tt.envGitLabels != "" {
@@ -124,9 +124,10 @@ func TestGetGitAttributes(t *testing.T) {
 			for _, e := range tt.expected {
 				assert.Contains(t, so.FrontendAttrs, e)
 				assert.NotEmpty(t, so.FrontendAttrs[e])
-				if e == "label:"+DockerfileLabel {
+				switch e {
+				case "label:" + DockerfileLabel:
 					assert.Equal(t, "Dockerfile", so.FrontendAttrs[e])
-				} else if e == "label:"+specs.AnnotationSource || e == "vcs:source" {
+				case "label:" + ocispecs.AnnotationSource, "vcs:source":
 					assert.Equal(t, "git@github.com:docker/buildx.git", so.FrontendAttrs[e])
 				}
 			}
@@ -154,10 +155,10 @@ func TestGetGitAttributesDirty(t *testing.T) {
 
 	assert.Contains(t, so.FrontendAttrs, "label:"+DockerfileLabel)
 	assert.Equal(t, "Dockerfile", so.FrontendAttrs["label:"+DockerfileLabel])
-	assert.Contains(t, so.FrontendAttrs, "label:"+specs.AnnotationSource)
-	assert.Equal(t, "git@github.com:docker/buildx.git", so.FrontendAttrs["label:"+specs.AnnotationSource])
-	assert.Contains(t, so.FrontendAttrs, "label:"+specs.AnnotationRevision)
-	assert.True(t, strings.HasSuffix(so.FrontendAttrs["label:"+specs.AnnotationRevision], "-dirty"))
+	assert.Contains(t, so.FrontendAttrs, "label:"+ocispecs.AnnotationSource)
+	assert.Equal(t, "git@github.com:docker/buildx.git", so.FrontendAttrs["label:"+ocispecs.AnnotationSource])
+	assert.Contains(t, so.FrontendAttrs, "label:"+ocispecs.AnnotationRevision)
+	assert.True(t, strings.HasSuffix(so.FrontendAttrs["label:"+ocispecs.AnnotationRevision], "-dirty"))
 
 	assert.Contains(t, so.FrontendAttrs, "vcs:source")
 	assert.Equal(t, "git@github.com:docker/buildx.git", so.FrontendAttrs["vcs:source"])
@@ -188,19 +189,19 @@ func TestLocalDirs(t *testing.T) {
 }
 
 func TestLocalDirsSub(t *testing.T) {
-	gitutil.Mktmp(t)
+	gittestutil.Mktmp(t)
 
 	c, err := gitutil.New()
 	require.NoError(t, err)
-	gitutil.GitInit(c, t)
+	gittestutil.GitInit(c, t)
 
 	df := []byte("FROM alpine:latest\n")
 	require.NoError(t, os.MkdirAll("app", 0755))
 	require.NoError(t, os.WriteFile("app/Dockerfile", df, 0644))
 
-	gitutil.GitAdd(c, t, "app/Dockerfile")
-	gitutil.GitCommit(c, t, "initial commit")
-	gitutil.GitSetRemote(c, t, "origin", "git@github.com:docker/buildx.git")
+	gittestutil.GitAdd(c, t, "app/Dockerfile")
+	gittestutil.GitCommit(c, t, "initial commit")
+	gittestutil.GitSetRemote(c, t, "origin", "git@github.com:docker/buildx.git")
 
 	so := &client.SolveOpt{
 		FrontendAttrs: map[string]string{},

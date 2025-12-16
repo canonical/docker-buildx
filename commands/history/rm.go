@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 
-	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/cli/cli/command"
 	"github.com/hashicorp/go-multierror"
@@ -21,19 +20,9 @@ type rmOptions struct {
 }
 
 func runRm(ctx context.Context, dockerCli command.Cli, opts rmOptions) error {
-	b, err := builder.New(dockerCli, builder.WithName(opts.builder))
+	nodes, err := loadNodes(ctx, dockerCli, opts.builder)
 	if err != nil {
 		return err
-	}
-
-	nodes, err := b.LoadNodes(ctx)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if node.Err != nil {
-			return node.Err
-		}
 	}
 
 	errs := make([][]error, len(opts.refs))
@@ -43,7 +32,6 @@ func runRm(ctx context.Context, dockerCli command.Cli, opts rmOptions) error {
 
 	eg, ctx := errgroup.WithContext(ctx)
 	for i, node := range nodes {
-		node := node
 		eg.Go(func() error {
 			if node.Driver == nil {
 				return nil
@@ -141,7 +129,8 @@ func rmCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 			options.builder = *rootOpts.Builder
 			return runRm(cmd.Context(), dockerCli, options)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()

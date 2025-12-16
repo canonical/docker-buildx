@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	controllerapi "github.com/docker/buildx/controller/pb"
 	"github.com/moby/buildkit/util/gitutil"
 )
 
@@ -28,19 +27,7 @@ func (s SSHKeys) Normalize() SSHKeys {
 	if len(s) == 0 {
 		return nil
 	}
-	return removeDupes(s)
-}
-
-func (s SSHKeys) ToPB() []*controllerapi.SSH {
-	if len(s) == 0 {
-		return nil
-	}
-
-	entries := make([]*controllerapi.SSH, len(s))
-	for i, entry := range s {
-		entries[i] = entry.ToPB()
-	}
-	return entries
+	return removeSSHDupes(s)
 }
 
 type SSH struct {
@@ -70,13 +57,6 @@ func (s *SSH) String() string {
 	return b.String()
 }
 
-func (s *SSH) ToPB() *controllerapi.SSH {
-	return &controllerapi.SSH{
-		ID:    s.ID,
-		Paths: s.Paths,
-	}
-}
-
 func (s *SSH) UnmarshalJSON(data []byte) error {
 	var v struct {
 		ID    string   `json:"id,omitempty"`
@@ -103,8 +83,8 @@ func (s *SSH) UnmarshalText(text []byte) error {
 	return nil
 }
 
-func ParseSSHSpecs(sl []string) ([]*controllerapi.SSH, error) {
-	var outs []*controllerapi.SSH
+func ParseSSHSpecs(sl []string) ([]*SSH, error) {
+	var outs []*SSH
 	if len(sl) == 0 {
 		return nil, nil
 	}
@@ -118,7 +98,7 @@ func ParseSSHSpecs(sl []string) ([]*controllerapi.SSH, error) {
 		if err := out.UnmarshalText([]byte(s)); err != nil {
 			return nil, err
 		}
-		outs = append(outs, out.ToPB())
+		outs = append(outs, &out)
 	}
 	return outs, nil
 }
@@ -130,4 +110,18 @@ func IsGitSSH(repo string) bool {
 		return false
 	}
 	return url.Scheme == gitutil.SSHProtocol
+}
+
+func removeSSHDupes(s []*SSH) []*SSH {
+	var res []*SSH
+	m := map[string]int{}
+	for _, ssh := range s {
+		if i, ok := m[ssh.ID]; ok {
+			res[i] = ssh
+		} else {
+			m[ssh.ID] = len(res)
+			res = append(res, ssh)
+		}
+	}
+	return res
 }
