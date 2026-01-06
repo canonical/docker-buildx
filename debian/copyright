@@ -8,13 +8,8 @@ Files: *
 Copyright: The Buildx Authors
 License: Apache-2.0
 
-Files: hack/dockerfiles/generated-files.Dockerfile
-Copyright: The BuildKit Authors
-           The Buildx Authors
-License: Apache-2.0
-
 Files: debian/*
-Copyright: 2023 Canonical Ltd.
+Copyright: 2023-2025 Canonical Ltd.
 License: Apache-2.0
 
 Files: vendor/go.opentelemetry.io/*
@@ -94,18 +89,18 @@ Files: vendor/sigs.k8s.io/yaml/fields.go
 Copyright: 2013 The Go Authors
 License: BSD-3-clause-Google
 
-Files: vendor/gopkg.in/yaml.v2/*
+Files: vendor/go.yaml.in/yaml/v2/*
 Copyright: 2011-2016 Canonical Ltd
 License: Apache-2.0
 
-Files: vendor/gopkg.in/yaml.v2/apic.go
-       vendor/gopkg.in/yaml.v2/emitterc.go
-       vendor/gopkg.in/yaml.v2/parserc.go
-       vendor/gopkg.in/yaml.v2/readerc.go
-       vendor/gopkg.in/yaml.v2/scannerc.go
-       vendor/gopkg.in/yaml.v2/writerc.go
-       vendor/gopkg.in/yaml.v2/yamlh.go
-       vendor/gopkg.in/yaml.v2/yamlprivateh.go
+Files: vendor/go.yaml.in/yaml/v2/apic.go
+       vendor/go.yaml.in/yaml/v2/emitterc.go
+       vendor/go.yaml.in/yaml/v2/parserc.go
+       vendor/go.yaml.in/yaml/v2/readerc.go
+       vendor/go.yaml.in/yaml/v2/scannerc.go
+       vendor/go.yaml.in/yaml/v2/writerc.go
+       vendor/go.yaml.in/yaml/v2/yamlh.go
+       vendor/go.yaml.in/yaml/v2/yamlprivateh.go
 Copyright: 2006 Kirill Simonov
 License: Expat
 
@@ -132,10 +127,6 @@ License: BSD-3-clause-Google
 
 Files: vendor/github.com/apparentlymart/*
 Copyright: 2015-2017 Martin Atkins
-License: Expat
-
-Files: vendor/github.com/cespare/xxhash/v2/*
-Copyright: 2016 Caleb Spare
 License: Expat
 
 Files: vendor/github.com/compose-spec/compose-go/*
@@ -217,7 +208,7 @@ Files: vendor/github.com/gogo/protobuf/*/*_gogo.go
        vendor/github.com/gogo/protobuf/proto/wrappers.go
        vendor/github.com/gogo/protobuf/sortkeys/sortkeys.go
 Copyright: 2013-2018 The GoGo Authors
-License: BSD-2-clause 
+License: BSD-2-clause
 
 Files: vendor/google.golang.org/genproto/googleapis/*
 Copyright: 2024 Google LLC
@@ -241,10 +232,6 @@ License: BSD-3-clause-Generic
 
 Files: vendor/github.com/inconshreveable/mousetrap/*
 Copyright: 2022 Alan Shreve <@inconshreveable>
-License: Apache-2.0
-
-Files: vendor/github.com/google/gofuzz/*
-Copyright: 2014 Google Inc
 License: Apache-2.0
 
 Files: vendor/github.com/google/go-cmp/*
@@ -309,40 +296,6 @@ Files: vendor/github.com/emicklei/go-restful/v3/*
 Copyright: 2012-2021 Ernest Micklei
 License: Expat
 
-Files: vendor/github.com/theupdateframework/notary/*
-Copyright: 2015 Docker, Inc
-License: Apache-2.0
-
-Files: vendor/github.com/theupdateframework/notary/tuf/*
-Copyright: 2015 Docker Inc
-           2014-2015 Prime Directive, Inc
-License: BSD-3-clause-Prime
-
-Files: vendor/github.com/theupdateframework/notary/tuf/utils/pkcs8.go
-Copyright: 2014 youmark
-License: Expat
-
-Files: vendor/github.com/miekg/pkcs11/*
-Copyright: 2013 Miek Gieben
-License: BSD-3-clause-Generic
-
-Files: vendor/github.com/miekg/pkcs11/pkcs11.h
-       vendor/github.com/miekg/pkcs11/pkcs11t.h
-       vendor/github.com/miekg/pkcs11/pkcs11f.h
-Copyright: 2016 OASIS Open
-License: OASIS-IPR-Policy
-
-Files: vendor/github.com/prometheus/*
-Copyright: 2013-2022 The Prometheus Authors
-License: Apache-2.0
-
-Files: vendor/github.com/prometheus/client_golang/*
-Copyright: 2012-2021 The Prometheus Authors
-           2013-2015 Blake Mizerany, Björn Rabenstein
-           2010 The Go Authors
-           2013 Matt T. Proud
-License: Apache-2.0
-
 Files: vendor/github.com/mailru/easyjson/*
 Copyright: 2016 Mail.Ru Group
 License: Expat
@@ -351,32 +304,11 @@ Files: vendor/github.com/hashicorp/*
 Copyright: Hashicorp
 License: MPL-2.0
 
-Files: vendor/github.com/beorn7/perks/*
-Copyright: 2013 Blake Mizerany
-License: Expat
-
-Files: vendor/github.com/AdaLogics/go-fuzz-headers/*
-Copyright: 2023 The go-fuzz-headers Authors
-License: Apache-2.0
-
-Files: vendor/github.com/xeipuuv/*
-Copyright: 2015 xeipuuv <https://github.com/xeipuuv>
-License: Apache-2.0
-
-Files: vendor/github.com/xeipuuv/gojsonschema/schemaLoader.go
-       vendor/github.com/xeipuuv/gojsonschema/draft.go
-Copyright: 2018 johandorland <https://github.com/johandorland>
-License: Apache-2.0
-
-Files: vendor/github.com/xeipuuv/gojsonschema/jsonContext.go
-Copyright: 2013 MongoDB, Inc
-License: Apache-2.0
-
 Files: vendor/github.com/mattn/go-shellwords/*
 Copyright: 2017 Yasuhiro Matsumoto
 License: Expat
 
-Files: vendor/github.com/cenkalti/backoff/v4/*
+Files: vendor/github.com/cenkalti/backoff/v5/*
 Copyright: 2014 Cenk Altı
 License: Expat
 
@@ -445,10 +377,6 @@ Files: vendor/github.com/docker/docker-credential-helpers/*
 Copyright: 2016 David Calavera
 License: Expat
 
-Files: vendor/github.com/docker/go/*
-Copyright: 2010-2013 The Go Authors
-License: BSD-3-clause-Google
-
 Files: vendor/github.com/docker/cli-docs-tool/*
 Copyright: 2017-2021 cli-docs-tool authors
 License: Apache-2.0
@@ -474,10 +402,6 @@ Files: vendor/github.com/mitchellh/*
 Copyright: 2013-2014 Mitchell Hashimoto
 License: Expat
 
-Files: vendor/github.com/gorilla/mux/*
-Copyright: 2012-2018 The Gorilla Authors
-License: BSD-3-clause-Google
-
 Files: vendor/github.com/opencontainers/go-digest/*
 Copyright: 2019-2020 OCI Contributors
            2016-2017 Docker, Inc
@@ -486,11 +410,6 @@ License: Apache-2.0
 Files: vendor/github.com/opencontainers/image-spec/*
 Copyright: 2016-2022 The Linux Foundation
 License: Apache-2.0
-
-Files: vendor/github.com/imdario/mergo/*
-Copyright: 2013-2014 Dario Castañé
-           2009-2012 The Go Authors
-License: BSD-3-clause-Google
 
 Files: vendor/github.com/pmezard/go-difflib/*
 Copyright: 2013 Patrick Mezard
@@ -507,6 +426,22 @@ License: Apache-2.0
 Files: vendor/github.com/stretchr/testify/*
 Copyright: 2012-2020 Mat Ryer, Tyler Bunnell and contributors
 License: Expat
+
+Files: vendor/go.opentelemetry.io/otel/*
+Copyright: The OpenTelemetry Authors
+License: Apache-2.0
+
+Files: vendor/github.com/modern-go/*
+Copyright: 2019, Tao Wen
+License: Apache-2.0
+
+Files: vendor/github.com/cpuguy83/*
+Copyright: 2014, Brian Goff
+License: Expat
+
+Files: vendor/github.com/distribution/*
+Copyright: 2004-2006, The Linux Foundation and its contributors
+License: Apache-2.0
 
 License: Apache-2.0
  Licensed under the Apache License, Version 2.0 (the "License");
@@ -557,35 +492,6 @@ License: BSD-3-clause-Google
  in the documentation and/or other materials provided with the
  distribution.
     * Neither the name of Google Inc. nor the names of its
- contributors may be used to endorse or promote products derived from
- this software without specific prior written permission.
- .
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-License: BSD-3-clause-Prime
- All rights reserved.
- .
- Redistribution and use in source and binary forms, with or without
- modification, are permitted provided that the following conditions are
- met:
- .
-    * Redistributions of source code must retain the above copyright
- notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above
- copyright notice, this list of conditions and the following disclaimer
- in the documentation and/or other materials provided with the
- distribution.
-    * Neither the name of Prime Directive, Inc. nor the names of its
  contributors may be used to endorse or promote products derived from
  this software without specific prior written permission.
  .
@@ -1010,9 +916,3 @@ License: ISC
  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-
-License: OASIS-IPR-Policy
- Distributed under the terms of the OASIS IPR Policy,
- [http://www.oasis-open.org/policies-guidelines/ipr], AS-IS, WITHOUT ANY
- IMPLIED OR EXPRESS WARRANTY; there is no warranty of MERCHANTABILITY, FITNESS
- FOR A PARTICULAR PURPOSE or NONINFRINGEMENT of the rights of others.
