@@ -443,6 +443,14 @@ Files: vendor/github.com/distribution/*
 Copyright: 2004-2006, The Linux Foundation and its contributors
 License: Apache-2.0
 
+Files: vendor/github.com/santhosh-tekuri/*
+Copyright: 2017-2025, Santhosh Kumar Tekuri
+License: Apache-2.0
+
+Files: vendor/github.com/google/go-dap/*
+Copyright: 2020-2021, Google LLC
+License: Apache-2.0
+
 License: Apache-2.0
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
