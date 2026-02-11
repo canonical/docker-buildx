@@ -1,3 +1,9 @@
+docker-buildx (0.30.1-0ubuntu1~25.10.1) questing; urgency=medium
+
+  * Backport from resolute to questing (LP: #2127661)
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Wed, 11 Feb 2026 11:41:59 -0300
+
 docker-buildx (0.30.1-0ubuntu1) resolute; urgency=medium
 
   * New upstream version 0.30.1
