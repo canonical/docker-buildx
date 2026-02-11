@@ -13,10 +13,10 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 )
 
-// curl -s --unix-socket /tmp/docker-desktop-build-dev.sock http://localhost/blobs/default/default?digest=sha256:3103104e9fa908087bd47572da6ad9a5a7bf973608f736536d18d635a7da0140 -X GET > ./fixtures/bktraces.json
-const bktracesFixture = "./fixtures/bktraces.json"
-
-const otlpFixture = "./fixtures/otlp.json"
+const (
+	bktracesFixture = "./fixtures/bktraces.json"
+	otlpFixture     = "./fixtures/otlp.json"
+)
 
 func TestParseSpanStubs(t *testing.T) {
 	dt, err := os.ReadFile(bktracesFixture)
@@ -30,7 +30,7 @@ func TestParseSpanStubs(t *testing.T) {
 	require.NoError(t, err)
 	dtotel, err := os.ReadFile(otlpFixture)
 	require.NoError(t, err)
-	require.Equal(t, string(dtotel), string(dtSpanStubs))
+	require.Equal(t, string(bytes.TrimSpace(dtotel)), string(dtSpanStubs))
 
 	exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 	require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestAsAttributeKeyValue(t *testing.T) {
 			name: "stringslice (interface of string)",
 			args: args{
 				Type:  attribute.STRINGSLICE.String(),
-				value: []interface{}{"value1", "value2"},
+				value: []any{"value1", "value2"},
 			},
 			want: attribute.StringSlice("key", []string{"value1", "value2"}),
 		},
@@ -139,13 +139,12 @@ func TestAsAttributeKeyValue(t *testing.T) {
 			name: "stringslice (interface mixed)",
 			args: args{
 				Type:  attribute.STRINGSLICE.String(),
-				value: []interface{}{"value1", 2},
+				value: []any{"value1", 2},
 			},
 			want: attribute.StringSlice("key", []string{"value1", "2"}),
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			kv := keyValue{
 				Key:   "key",

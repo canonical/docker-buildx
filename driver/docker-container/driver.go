@@ -12,23 +12,24 @@ import (
 	"sync/atomic"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/buildx/driver"
 	"github.com/docker/buildx/driver/bkimage"
 	"github.com/docker/buildx/util/confutil"
+	"github.com/docker/buildx/util/ghutil"
 	"github.com/docker/buildx/util/imagetools"
 	"github.com/docker/buildx/util/progress"
+	"github.com/docker/cli/cli/context/docker"
 	"github.com/docker/cli/opts"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/system"
-	"github.com/docker/docker/errdefs"
-	dockerarchive "github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/moby/buildkit/client"
+	mobyarchive "github.com/moby/go-archive"
 	"github.com/pkg/errors"
 )
 
@@ -43,19 +44,21 @@ type Driver struct {
 
 	// if you add fields, remember to update docs:
 	// https://github.com/docker/docs/blob/main/content/build/drivers/docker-container.md
-	netMode       string
-	image         string
-	memory        opts.MemBytes
-	memorySwap    opts.MemSwapBytes
-	cpuQuota      int64
-	cpuPeriod     int64
-	cpuShares     int64
-	cpusetCpus    string
-	cpusetMems    string
-	cgroupParent  string
-	restartPolicy container.RestartPolicy
-	env           []string
-	defaultLoad   bool
+	netMode            string
+	image              string
+	memory             opts.MemBytes
+	memorySwap         opts.MemSwapBytes
+	cpuQuota           int64
+	cpuPeriod          int64
+	cpuShares          int64
+	cpusetCpus         string
+	cpusetMems         string
+	cgroupParent       string
+	restartPolicy      container.RestartPolicy
+	env                []string
+	defaultLoad        bool
+	gpus               []container.DeviceRequest
+	writeProvenanceGHA bool
 }
 
 func (d *Driver) IsMobyDriver() bool {
@@ -70,7 +73,7 @@ func (d *Driver) Bootstrap(ctx context.Context, l progress.Logger) error {
 	return progress.Wrap("[internal] booting buildkit", l, func(sub progress.SubLogger) error {
 		_, err := d.DockerAPI.ContainerInspect(ctx, d.Name)
 		if err != nil {
-			if errdefs.IsNotFound(err) {
+			if cerrdefs.IsNotFound(err) {
 				return d.create(ctx, sub)
 			}
 			return err
@@ -125,38 +128,75 @@ func (d *Driver) create(ctx context.Context, l progress.SubLogger) error {
 		hc := &container.HostConfig{
 			Privileged:    true,
 			RestartPolicy: d.restartPolicy,
-			Mounts: []mount.Mount{
-				{
-					Type:   mount.TypeVolume,
-					Source: d.Name + volumeStateSuffix,
-					Target: confutil.DefaultBuildKitStateDir,
-				},
-			},
-			Init: &useInit,
+			Init:          &useInit,
 		}
+
+		mounts := []mount.Mount{
+			{
+				Type:   mount.TypeVolume,
+				Source: d.Name + volumeStateSuffix,
+				Target: confutil.DefaultBuildKitStateDir,
+			},
+		}
+
+		if d.writeProvenanceGHA {
+			if ghactx, err := ghutil.GithubActionsContext(); err != nil {
+				return err
+			} else if ghactx != nil {
+				if d.Files == nil {
+					d.Files = make(map[string][]byte)
+				}
+				d.Files["provenance.d/github_actions_context.json"] = ghactx
+			}
+		}
+
+		// Mount WSL libaries if running in WSL environment and Docker context
+		// is a local socket as requesting GPU on container builder creation
+		// is not enough when generating the CDI specification for GPU devices.
+		// https://github.com/docker/buildx/pull/3320
+		if os.Getenv("WSL_DISTRO_NAME") != "" {
+			if cm, err := d.ContextStore.GetMetadata(d.DockerContext); err == nil {
+				if epm, err := docker.EndpointFromContext(cm); err == nil && isSocket(epm.Host) {
+					wslLibPath := "/usr/lib/wsl"
+					if st, err := os.Stat(wslLibPath); err == nil && st.IsDir() {
+						mounts = append(mounts, mount.Mount{
+							Type:     mount.TypeBind,
+							Source:   wslLibPath,
+							Target:   wslLibPath,
+							ReadOnly: true,
+						})
+					}
+				}
+			}
+		}
+		hc.Mounts = mounts
+
 		if d.netMode != "" {
 			hc.NetworkMode = container.NetworkMode(d.netMode)
 		}
 		if d.memory != 0 {
-			hc.Resources.Memory = int64(d.memory)
+			hc.Memory = int64(d.memory)
 		}
 		if d.memorySwap != 0 {
-			hc.Resources.MemorySwap = int64(d.memorySwap)
+			hc.MemorySwap = int64(d.memorySwap)
 		}
 		if d.cpuQuota != 0 {
-			hc.Resources.CPUQuota = d.cpuQuota
+			hc.CPUQuota = d.cpuQuota
 		}
 		if d.cpuPeriod != 0 {
-			hc.Resources.CPUPeriod = d.cpuPeriod
+			hc.CPUPeriod = d.cpuPeriod
 		}
 		if d.cpuShares != 0 {
-			hc.Resources.CPUShares = d.cpuShares
+			hc.CPUShares = d.cpuShares
 		}
 		if d.cpusetCpus != "" {
-			hc.Resources.CpusetCpus = d.cpusetCpus
+			hc.CpusetCpus = d.cpusetCpus
 		}
 		if d.cpusetMems != "" {
-			hc.Resources.CpusetMems = d.cpusetMems
+			hc.CpusetMems = d.cpusetMems
+		}
+		if len(d.gpus) > 0 && d.hasGPUCapability(ctx, cfg.Image, d.gpus) {
+			hc.DeviceRequests = d.gpus
 		}
 		if info, err := d.DockerAPI.Info(ctx); err == nil {
 			if info.CgroupDriver == "cgroupfs" {
@@ -180,11 +220,11 @@ func (d *Driver) create(ctx context.Context, l progress.SubLogger) error {
 			}
 		}
 		_, err := d.DockerAPI.ContainerCreate(ctx, cfg, hc, &network.NetworkingConfig{}, nil, d.Name)
-		if err != nil && !errdefs.IsConflict(err) {
+		if err != nil && !cerrdefs.IsConflict(err) {
 			return err
 		}
 		if err == nil {
-			if err := d.copyToContainer(ctx, d.InitConfig.Files); err != nil {
+			if err := d.copyToContainer(ctx, d.Files); err != nil {
 				return err
 			}
 			if err := d.start(ctx); err != nil {
@@ -246,8 +286,8 @@ func (d *Driver) copyToContainer(ctx context.Context, files map[string][]byte) e
 	if srcPath != "" {
 		defer os.RemoveAll(srcPath)
 	}
-	srcArchive, err := dockerarchive.TarWithOptions(srcPath, &dockerarchive.TarOptions{
-		ChownOpts: &idtools.Identity{UID: 0, GID: 0},
+	srcArchive, err := mobyarchive.TarWithOptions(srcPath, &mobyarchive.TarOptions{
+		ChownOpts: &mobyarchive.ChownOpts{UID: 0, GID: 0},
 	})
 	if err != nil {
 		return err
@@ -307,7 +347,7 @@ func (d *Driver) start(ctx context.Context) error {
 func (d *Driver) Info(ctx context.Context) (*driver.Info, error) {
 	ctn, err := d.DockerAPI.ContainerInspect(ctx, d.Name)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return &driver.Info{
 				Status: driver.Inactive,
 			}, nil
@@ -420,12 +460,38 @@ func (d *Driver) Features(ctx context.Context) map[driver.Feature]bool {
 		driver.DockerExporter: true,
 		driver.CacheExport:    true,
 		driver.MultiPlatform:  true,
+		driver.DirectPush:     true,
 		driver.DefaultLoad:    d.defaultLoad,
 	}
 }
 
 func (d *Driver) HostGatewayIP(ctx context.Context) (net.IP, error) {
 	return nil, errors.New("host-gateway is not supported by the docker-container driver")
+}
+
+// hasGPUCapability checks if docker daemon has GPU capability. We need to run
+// a dummy container with GPU device to check if the daemon has this capability
+// because there is no API to check it yet.
+func (d *Driver) hasGPUCapability(ctx context.Context, image string, gpus []container.DeviceRequest) bool {
+	cfg := &container.Config{
+		Image:      image,
+		Entrypoint: []string{"/bin/true"},
+	}
+	hc := &container.HostConfig{
+		NetworkMode: container.NetworkMode(container.IPCModeNone),
+		AutoRemove:  true,
+		Resources: container.Resources{
+			DeviceRequests: gpus,
+		},
+	}
+	resp, err := d.DockerAPI.ContainerCreate(ctx, cfg, hc, &network.NetworkingConfig{}, nil, "")
+	if err != nil {
+		return false
+	}
+	if err := d.DockerAPI.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return false
+	}
+	return true
 }
 
 func demuxConn(c net.Conn) net.Conn {
@@ -501,4 +567,13 @@ func getBuildkitFlags(initConfig driver.InitConfig) []string {
 		flags = append(newFlags, flags...)
 	}
 	return flags
+}
+
+func isSocket(addr string) bool {
+	switch proto, _, _ := strings.Cut(addr, "://"); proto {
+	case "unix", "npipe", "fd":
+		return true
+	default:
+		return false
+	}
 }

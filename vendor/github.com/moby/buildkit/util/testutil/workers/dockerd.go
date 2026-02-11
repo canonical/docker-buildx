@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/client"
 	"github.com/moby/buildkit/cmd/buildkitd/config"
 	"github.com/moby/buildkit/util/testutil/dockerd"
+	"github.com/moby/buildkit/util/testutil/dockerd/client"
 	"github.com/moby/buildkit/util/testutil/integration"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
@@ -93,9 +93,12 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 		}
 	}()
 
-	cfgFile, err := integration.WriteConfig(cfg.DaemonConfig)
+	cfgFile, release, err := integration.WriteConfig(cfg.DaemonConfig)
 	if err != nil {
 		return nil, nil, err
+	}
+	if release != nil {
+		deferF.Append(release)
 	}
 	deferF.Append(func() error {
 		return os.RemoveAll(filepath.Dir(cfgFile))
@@ -111,6 +114,7 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 			"containerd-snapshotter": c.ContainerdSnapshotter,
 		},
 	}
+
 	if reg, ok := bkcfg.Registries["docker.io"]; ok && len(reg.Mirrors) > 0 {
 		for _, m := range reg.Mirrors {
 			dcfg.Mirrors = append(dcfg.Mirrors, "http://"+m)
@@ -123,6 +127,8 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 				dcfg.Builder.Entitlements.NetworkHost = true
 			case "security.insecure":
 				dcfg.Builder.Entitlements.SecurityInsecure = true
+			case "device":
+				dcfg.Builder.Entitlements.Device = true
 			}
 		}
 	}
@@ -158,10 +164,13 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 
 	dockerdFlags := []string{
 		"--config-file", dockerdConfigFile,
-		"--userland-proxy=false",
 		"--tls=false",
 		"--debug",
 	}
+
+	// add platform-specific flags
+	dockerdFlags = applyDockerdPlatformFlags(dockerdFlags, c.ID)
+
 	if s := os.Getenv("BUILDKIT_INTEGRATION_DOCKERD_FLAGS"); s != "" {
 		dockerdFlags = append(dockerdFlags, strings.Split(strings.TrimSpace(s), "\n")...)
 	}
@@ -198,7 +207,7 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 	f.Close()
 	os.Remove(localPath)
 
-	listener, err := net.Listen("unix", localPath)
+	listener, err := net.Listen(buildkitdNetworkProtocol, getBuildkitdNetworkAddr(localPath))
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "dockerd listener error: %s", integration.FormatLogs(cfg.Logs))
 	}
@@ -234,7 +243,7 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 	})
 
 	return backend{
-		address:             "unix://" + listener.Addr().String(),
+		address:             buildkitdNetworkProtocol + "://" + listener.Addr().String(),
 		dockerAddress:       d.Sock(),
 		rootless:            c.IsRootless,
 		netnsDetached:       false,
@@ -252,7 +261,7 @@ func waitForAPI(ctx context.Context, apiClient *client.Client, d time.Duration) 
 	step := 50 * time.Millisecond
 	i := 0
 	for {
-		if _, err := apiClient.Ping(ctx); err == nil {
+		if err := apiClient.Ping(ctx); err == nil {
 			break
 		}
 		i++

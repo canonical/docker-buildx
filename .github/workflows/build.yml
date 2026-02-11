@@ -36,8 +36,8 @@ env:
   TEST_CACHE_SCOPE: "test"
   TESTFLAGS: "-v --parallel=6 --timeout=30m"
   GOTESTSUM_FORMAT: "standard-verbose"
-  GO_VERSION: "1.23"
-  GOTESTSUM_VERSION: "v1.9.0"  # same as one in Dockerfile
+  GO_VERSION: "1.25"
+  GOTESTSUM_VERSION: "v1.13.0"  # same as one in Dockerfile
 
 jobs:
   test-integration:
@@ -54,9 +54,9 @@ jobs:
           - master
           - latest
           - buildx-stable-1
-          - v0.19.0
-          - v0.18.2
-          - v0.17.2
+          - v0.25.2
+          - v0.24.0
+          - v0.23.2
         worker:
           - docker-container
           - remote
@@ -74,6 +74,16 @@ jobs:
             pkg: ./tests
             mode: experimental
           - worker: docker+containerd  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+            mode: experimental
+          - worker: "docker@27.5"
+            pkg: ./tests
+          - worker: "docker+containerd@27.5"  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+          - worker: "docker@27.5"
+            pkg: ./tests
+            mode: experimental
+          - worker: "docker+containerd@27.5"  # same as docker, but with containerd snapshotter
             pkg: ./tests
             mode: experimental
           - worker: "docker@26.1"
@@ -111,7 +121,7 @@ jobs:
           fi
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
       -
@@ -157,7 +167,7 @@ jobs:
       -
         name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-reports-${{ env.TESTREPORTS_NAME }}
           path: ./bin/testreports
@@ -181,10 +191,10 @@ jobs:
           git config --global core.eol lf
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       -
         name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "${{ env.GO_VERSION }}"
       -
@@ -235,7 +245,7 @@ jobs:
       -
         name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-reports-${{ env.TESTREPORTS_NAME }}
           path: ${{ env.TESTREPORTS_BASEDIR }}
@@ -248,15 +258,23 @@ jobs:
       matrix:
         os:
           - freebsd
+          - netbsd
           - openbsd
+    env:
+      # https://github.com/hashicorp/vagrant/issues/13652
+      VAGRANT_DISABLE_STRICT_DEPENDENCY_ENFORCEMENT: 1
     steps:
       -
         name: Prepare
         run: |
           echo "VAGRANT_FILE=hack/Vagrantfile.${{ matrix.os }}" >> $GITHUB_ENV
+          
+          # Sets semver Go version to be able to download tarball during vagrant setup
+          goVersion=$(curl --silent "https://go.dev/dl/?mode=json&include=all" | jq -r '.[].files[].version' | uniq | sed -e 's/go//' | sort -V | grep $GO_VERSION | tail -1)
+          echo "GO_VERSION=$goVersion" >> $GITHUB_ENV
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       -
         name: Cache Vagrant boxes
         uses: actions/cache@v4
@@ -324,7 +342,7 @@ jobs:
       -
         name: Upload SARIF report
         if: ${{ github.ref == 'refs/heads/master' && github.repository == 'docker/buildx' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ env.DESTDIR }}/govulncheck.out
 
@@ -335,7 +353,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       -
         name: Create matrix
         id: platforms
@@ -362,7 +380,7 @@ jobs:
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -383,7 +401,7 @@ jobs:
           CACHE_TO: type=gha,scope=binaries-${{ env.PLATFORM_PAIR }},mode=max
       -
         name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: buildx-${{ env.PLATFORM_PAIR }}
           path: ${{ env.DESTDIR }}/*
@@ -396,6 +414,18 @@ jobs:
       - test-unit
     if: ${{ github.event_name != 'pull_request' && github.repository == 'docker/buildx' }}
     steps:
+      -
+        name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+      -
+        name: Checkout
+        uses: actions/checkout@v5
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -429,9 +459,10 @@ jobs:
         name: Build and push image
         uses: docker/bake-action@v6
         with:
+          source: .
           files: |
             ./docker-bake.hcl
-            cwd://${{ steps.meta.outputs.bake-file }}
+            ${{ steps.meta.outputs.bake-file }}
           targets: image-cross
           push: ${{ github.event_name != 'pull_request' }}
           sbom: true
@@ -466,7 +497,7 @@ jobs:
           image: registry://${{ env.REPO_SLUG }}:master
       -
         name: Upload SARIF report
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.scout.outputs.result-file }}
 
@@ -482,10 +513,10 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       -
         name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: ${{ env.DESTDIR }}
           pattern: buildx-*
@@ -504,7 +535,7 @@ jobs:
       -
         name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda  # v2.2.1
+        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090  # v2.4.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

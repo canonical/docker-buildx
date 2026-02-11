@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.22
+//go:build go1.23
 
 package formatter
 
@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-units"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
@@ -26,7 +27,17 @@ const (
 	mountsHeader     = "MOUNTS"
 	localVolumes     = "LOCAL VOLUMES"
 	networksHeader   = "NETWORKS"
+	platformHeader   = "PLATFORM"
 )
+
+// Platform wraps a [ocispec.Platform] to implement the stringer interface.
+type Platform struct {
+	ocispec.Platform
+}
+
+func (p Platform) String() string {
+	return platforms.FormatAll(p.Platform)
+}
 
 // NewContainerFormat returns a Format for rendering using a Context
 func NewContainerFormat(source string, quiet bool, size bool) Format {
@@ -68,16 +79,14 @@ ports: {{- pad .Ports 1 0}}
 
 // ContainerWrite renders the context for a list of containers
 func ContainerWrite(ctx Context, containers []container.Summary) error {
-	render := func(format func(subContext SubContext) error) error {
+	return ctx.Write(NewContainerContext(), func(format func(subContext SubContext) error) error {
 		for _, ctr := range containers {
-			err := format(&ContainerContext{trunc: ctx.Trunc, c: ctr})
-			if err != nil {
+			if err := format(&ContainerContext{trunc: ctx.Trunc, c: ctr}); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	return ctx.Write(NewContainerContext(), render)
+	})
 }
 
 // ContainerContext is a struct used for rendering a list of containers in a Go template.
@@ -111,6 +120,7 @@ func NewContainerContext() *ContainerContext {
 		"Mounts":       mountsHeader,
 		"LocalVolumes": localVolumes,
 		"Networks":     networksHeader,
+		"Platform":     platformHeader,
 	}
 	return &containerCtx
 }
@@ -124,7 +134,7 @@ func (c *ContainerContext) MarshalJSON() ([]byte, error) {
 // option being set, the full or truncated ID is returned.
 func (c *ContainerContext) ID() string {
 	if c.trunc {
-		return stringid.TruncateID(c.c.ID)
+		return TruncateID(c.c.ID)
 	}
 	return c.c.ID
 }
@@ -161,7 +171,7 @@ func (c *ContainerContext) Image() string {
 		return "<no image>"
 	}
 	if c.trunc {
-		if trunc := stringid.TruncateID(c.c.ImageID); trunc == stringid.TruncateID(c.c.Image) {
+		if trunc := TruncateID(c.c.ImageID); trunc == TruncateID(c.c.Image) {
 			return trunc
 		}
 		// truncate digest if no-trunc option was not selected
@@ -210,6 +220,16 @@ func (c *ContainerContext) RunningFor() string {
 	return units.HumanDuration(time.Now().UTC().Sub(createdAt)) + " ago"
 }
 
+// Platform returns a human-readable representation of the container's
+// platform if it is available.
+func (c *ContainerContext) Platform() *Platform {
+	p := c.c.ImageManifestDescriptor
+	if p == nil || p.Platform == nil {
+		return nil
+	}
+	return &Platform{*p.Platform}
+}
+
 // Ports returns a comma-separated string representing open ports of the container
 // e.g. "0.0.0.0:80->9090/tcp, 9988/tcp"
 // it's used by command 'docker ps'
@@ -218,7 +238,8 @@ func (c *ContainerContext) Ports() string {
 	return DisplayablePorts(c.c.Ports)
 }
 
-// State returns the container's current state (e.g. "running" or "paused")
+// State returns the container's current state (e.g. "running" or "paused").
+// Refer to [container.ContainerState] for possible states.
 func (c *ContainerContext) State() string {
 	return c.c.State
 }
@@ -255,6 +276,7 @@ func (c *ContainerContext) Labels() string {
 	for k, v := range c.c.Labels {
 		joinLabels = append(joinLabels, k+"="+v)
 	}
+	sort.Strings(joinLabels)
 	return strings.Join(joinLabels, ",")
 }
 
