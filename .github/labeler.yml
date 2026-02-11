@@ -48,10 +48,12 @@ area/cli:
       - cmd/**
       - commands/**
 
-# Add 'area/controller' label to changes in the controller
-area/controller:
+# Add 'area/dap' label to changes in dap files
+area/dap:
   - changed-files:
-    - any-glob-to-any-file: 'controller/**'
+    - any-glob-to-any-file:
+      - commands/dap.go
+      - dap/**
 
 # Add 'area/docs' label to markdown files in the docs folder
 area/docs:

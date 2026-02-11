@@ -130,19 +130,24 @@ func Image(ref string, opts ...ImageOption) State {
 		addCap(&info.Constraints, pb.CapSourceImageLayerLimit)
 	}
 
+	if info.checksum != "" {
+		attrs[pb.AttrImageChecksum] = info.checksum.String()
+		addCap(&info.Constraints, pb.CapSourceImageChecksum)
+	}
+
 	src := NewSource("docker-image://"+ref, attrs, info.Constraints) // controversial
 	if err != nil {
 		src.err = err
 	} else if info.metaResolver != nil {
 		if _, ok := r.(reference.Digested); ok || !info.resolveDigest {
 			return NewState(src.Output()).Async(func(ctx context.Context, st State, c *Constraints) (State, error) {
-				p := info.Constraints.Platform
+				p := info.Platform
 				if p == nil {
 					p = c.Platform
 				}
 				_, _, dt, err := info.metaResolver.ResolveImageConfig(ctx, ref, sourceresolver.Opt{
-					Platform: p,
 					ImageOpt: &sourceresolver.ResolveImageOpt{
+						Platform:    p,
 						ResolveMode: info.resolveMode.String(),
 					},
 				})
@@ -153,13 +158,13 @@ func Image(ref string, opts ...ImageOption) State {
 			})
 		}
 		return Scratch().Async(func(ctx context.Context, _ State, c *Constraints) (State, error) {
-			p := info.Constraints.Platform
+			p := info.Platform
 			if p == nil {
 				p = c.Platform
 			}
 			ref, dgst, dt, err := info.metaResolver.ResolveImageConfig(context.TODO(), ref, sourceresolver.Opt{
-				Platform: p,
 				ImageOpt: &sourceresolver.ResolveImageOpt{
+					Platform:    p,
 					ResolveMode: info.resolveMode.String(),
 				},
 			})
@@ -227,6 +232,7 @@ type ImageInfo struct {
 	resolveDigest bool
 	resolveMode   ResolveMode
 	layerLimit    *int
+	checksum      digest.Digest
 	RecordType    string
 }
 
@@ -247,9 +253,13 @@ const (
 // Formats that utilize SSH may need to supply credentials as a [GitOption].
 // You may need to check the source code for a full list of supported formats.
 //
+// Fragment can be used to pass ref:subdir format that can set in (old-style)
+// Docker Git URL format after # . This is provided for backwards compatibility.
+// It is recommended to leave it empty and call GitRef(), GitSubdir() options instead.
+//
 // By default the git repository is cloned with `--depth=1` to reduce the amount of data downloaded.
 // Additionally the ".git" directory is removed after the clone, you can keep ith with the [KeepGitDir] [GitOption].
-func Git(url, ref string, opts ...GitOption) State {
+func Git(url, fragment string, opts ...GitOption) State {
 	remote, err := gitutil.ParseURL(url)
 	if errors.Is(err, gitutil.ErrUnknownProtocol) {
 		url = "https://" + url
@@ -259,6 +269,20 @@ func Git(url, ref string, opts ...GitOption) State {
 		url = remote.Remote
 	}
 
+	gi := &GitInfo{
+		AuthHeaderSecret: GitAuthHeaderKey,
+		AuthTokenSecret:  GitAuthTokenKey,
+	}
+	ref, subdir, ok := strings.Cut(fragment, ":")
+	if ref != "" {
+		GitRef(ref).SetGitOption(gi)
+	}
+	if ok && subdir != "" {
+		GitSubDir(subdir).SetGitOption(gi)
+	}
+	for _, o := range opts {
+		o.SetGitOption(gi)
+	}
 	var id string
 	if err != nil {
 		// If we can't parse the URL, just use the full URL as the ID. The git
@@ -269,17 +293,12 @@ func Git(url, ref string, opts ...GitOption) State {
 		// for different protocols (e.g. https and ssh) that have the same
 		// host/path/fragment combination.
 		id = remote.Host + path.Join("/", remote.Path)
-		if ref != "" {
-			id += "#" + ref
+		if gi.Ref != "" || gi.SubDir != "" {
+			id += "#" + gi.Ref
+			if gi.SubDir != "" {
+				id += ":" + gi.SubDir
+			}
 		}
-	}
-
-	gi := &GitInfo{
-		AuthHeaderSecret: GitAuthHeaderKey,
-		AuthTokenSecret:  GitAuthTokenKey,
-	}
-	for _, o := range opts {
-		o.SetGitOption(gi)
 	}
 	attrs := map[string]string{}
 	if gi.KeepGitDir {
@@ -322,6 +341,17 @@ func Git(url, ref string, opts ...GitOption) State {
 		addCap(&gi.Constraints, pb.CapSourceGitMountSSHSock)
 	}
 
+	checksum := gi.Checksum
+	if checksum != "" {
+		attrs[pb.AttrGitChecksum] = checksum
+		addCap(&gi.Constraints, pb.CapSourceGitChecksum)
+	}
+
+	if gi.SkipSubmodules {
+		attrs[pb.AttrGitSkipSubmodules] = "true"
+		addCap(&gi.Constraints, pb.CapSourceGitSkipSubmodules)
+	}
+
 	addCap(&gi.Constraints, pb.CapSourceGit)
 
 	source := NewSource("git://"+id, attrs, gi.Constraints)
@@ -345,6 +375,28 @@ type GitInfo struct {
 	addAuthCap       bool
 	KnownSSHHosts    string
 	MountSSHSock     string
+	Checksum         string
+	Ref              string
+	SubDir           string
+	SkipSubmodules   bool
+}
+
+func GitRef(v string) GitOption {
+	return gitOptionFunc(func(gi *GitInfo) {
+		gi.Ref = v
+	})
+}
+
+func GitSubDir(v string) GitOption {
+	return gitOptionFunc(func(gi *GitInfo) {
+		gi.SubDir = v
+	})
+}
+
+func GitSkipSubmodules() GitOption {
+	return gitOptionFunc(func(gi *GitInfo) {
+		gi.SkipSubmodules = true
+	})
 }
 
 func KeepGitDir() GitOption {
@@ -360,13 +412,6 @@ func AuthTokenSecret(v string) GitOption {
 	})
 }
 
-func AuthHeaderSecret(v string) GitOption {
-	return gitOptionFunc(func(gi *GitInfo) {
-		gi.AuthHeaderSecret = v
-		gi.addAuthCap = true
-	})
-}
-
 func KnownSSHHosts(key string) GitOption {
 	key = strings.TrimSuffix(key, "\n")
 	return gitOptionFunc(func(gi *GitInfo) {
@@ -378,6 +423,35 @@ func MountSSHSock(sshID string) GitOption {
 	return gitOptionFunc(func(gi *GitInfo) {
 		gi.MountSSHSock = sshID
 	})
+}
+
+func GitChecksum(v string) GitOption {
+	return gitOptionFunc(func(gi *GitInfo) {
+		gi.Checksum = v
+	})
+}
+
+// AuthOption can be used with either HTTP or Git sources.
+type AuthOption interface {
+	GitOption
+	HTTPOption
+}
+
+// AuthHeaderSecret returns an AuthOption that defines the name of a
+// secret to use for HTTP based authentication.
+func AuthHeaderSecret(secretName string) AuthOption {
+	return struct {
+		GitOption
+		HTTPOption
+	}{
+		GitOption: gitOptionFunc(func(gi *GitInfo) {
+			gi.AuthHeaderSecret = secretName
+			gi.addAuthCap = true
+		}),
+		HTTPOption: httpOptionFunc(func(hi *HTTPInfo) {
+			hi.AuthHeaderSecret = secretName
+		}),
+	}
 }
 
 // Scratch returns a state that represents an empty filesystem.
@@ -418,6 +492,13 @@ func Local(name string, opts ...LocalOption) State {
 		if gi.Differ.Required {
 			addCap(&gi.Constraints, pb.CapSourceLocalDiffer)
 		}
+	}
+	if gi.MetadataOnlyCollector {
+		attrs[pb.AttrMetadataTransfer] = "true"
+		if gi.MetadataOnlyExceptions != "" {
+			attrs[pb.AttrMetadataTransferExclude] = gi.MetadataOnlyExceptions
+		}
+		addCap(&gi.Constraints, pb.CapSourceMetadataTransfer)
 	}
 
 	addCap(&gi.Constraints, pb.CapSourceLocal)
@@ -490,6 +571,18 @@ func Differ(t DiffType, required bool) LocalOption {
 	})
 }
 
+func MetadataOnlyTransfer(exceptions []string) LocalOption {
+	return localOptionFunc(func(li *LocalInfo) {
+		li.MetadataOnlyCollector = true
+		if len(exceptions) == 0 {
+			li.MetadataOnlyExceptions = ""
+		} else {
+			dt, _ := json.Marshal(exceptions) // empty on error
+			li.MetadataOnlyExceptions = string(dt)
+		}
+	})
+}
+
 func OCILayout(ref string, opts ...OCILayoutOption) State {
 	gi := &OCILayoutInfo{}
 
@@ -536,11 +629,18 @@ func OCILayerLimit(limit int) OCILayoutOption {
 	})
 }
 
+func OCIChecksum(dgst digest.Digest) OCILayoutOption {
+	return ociLayoutOptionFunc(func(oi *OCILayoutInfo) {
+		oi.checksum = dgst
+	})
+}
+
 type OCILayoutInfo struct {
 	constraintsWrapper
 	sessionID  string
 	storeID    string
 	layerLimit *int
+	checksum   digest.Digest
 }
 
 type DiffType string
@@ -562,12 +662,14 @@ type DifferInfo struct {
 
 type LocalInfo struct {
 	constraintsWrapper
-	SessionID       string
-	IncludePatterns string
-	ExcludePatterns string
-	FollowPaths     string
-	SharedKeyHint   string
-	Differ          DifferInfo
+	SessionID              string
+	IncludePatterns        string
+	ExcludePatterns        string
+	FollowPaths            string
+	SharedKeyHint          string
+	Differ                 DifferInfo
+	MetadataOnlyCollector  bool
+	MetadataOnlyExceptions string
 }
 
 func HTTP(url string, opts ...HTTPOption) State {
@@ -595,6 +697,14 @@ func HTTP(url string, opts ...HTTPOption) State {
 		attrs[pb.AttrHTTPGID] = strconv.Itoa(hi.GID)
 		addCap(&hi.Constraints, pb.CapSourceHTTPUIDGID)
 	}
+	if hi.AuthHeaderSecret != "" {
+		attrs[pb.AttrHTTPAuthHeaderSecret] = hi.AuthHeaderSecret
+		addCap(&hi.Constraints, pb.CapSourceHTTPAuth)
+	}
+	if hi.Header != nil {
+		hi.Header.setAttrs(attrs)
+		addCap(&hi.Constraints, pb.CapSourceHTTPHeader)
+	}
 
 	addCap(&hi.Constraints, pb.CapSourceHTTP)
 	source := NewSource(url, attrs, hi.Constraints)
@@ -603,11 +713,13 @@ func HTTP(url string, opts ...HTTPOption) State {
 
 type HTTPInfo struct {
 	constraintsWrapper
-	Checksum digest.Digest
-	Filename string
-	Perm     int
-	UID      int
-	GID      int
+	Checksum         digest.Digest
+	Filename         string
+	Perm             int
+	UID              int
+	GID              int
+	AuthHeaderSecret string
+	Header           *HTTPHeader
 }
 
 type HTTPOption interface {
@@ -643,6 +755,33 @@ func Chown(uid, gid int) HTTPOption {
 		hi.UID = uid
 		hi.GID = gid
 	})
+}
+
+// Header returns an [HTTPOption] that ensures additional request headers will
+// be sent when retrieving the HTTP source.
+func Header(header HTTPHeader) HTTPOption {
+	return httpOptionFunc(func(hi *HTTPInfo) {
+		hi.Header = &header
+	})
+}
+
+type HTTPHeader struct {
+	Accept    string
+	UserAgent string
+}
+
+func (hh *HTTPHeader) setAttrs(attrs map[string]string) {
+	if hh.Accept != "" {
+		attrs[hh.attr("accept")] = hh.Accept
+	}
+
+	if hh.UserAgent != "" {
+		attrs[hh.attr("user-agent")] = hh.UserAgent
+	}
+}
+
+func (hh *HTTPHeader) attr(name string) string {
+	return pb.AttrHTTPHeaderPrefix + name
 }
 
 func platformSpecificSource(id string) bool {

@@ -7,19 +7,20 @@ import (
 	"path/filepath"
 
 	"github.com/docker/buildx/commands"
-	controllererrors "github.com/docker/buildx/controller/errdefs"
+	"github.com/docker/buildx/util/cobrautil"
 	"github.com/docker/buildx/util/desktop"
 	"github.com/docker/buildx/version"
 	"github.com/docker/cli/cli"
-	"github.com/docker/cli/cli-plugins/manager"
+	"github.com/docker/cli/cli-plugins/metadata"
 	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/debug"
-	cliflags "github.com/docker/cli/cli/flags"
-	"github.com/moby/buildkit/solver/errdefs"
+	solvererrdefs "github.com/moby/buildkit/solver/errdefs"
+	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/moby/buildkit/util/stack"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
+	"google.golang.org/grpc/codes"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 
@@ -37,11 +38,7 @@ func init() {
 }
 
 func runStandalone(cmd *command.DockerCli) error {
-	if err := cmd.Initialize(cliflags.NewClientOptions()); err != nil {
-		return err
-	}
 	defer flushMetrics(cmd)
-
 	executable := os.Args[0]
 	rootCmd := commands.NewRootCmd(filepath.Base(executable), false, cmd)
 	return rootCmd.Execute()
@@ -64,7 +61,7 @@ func flushMetrics(cmd *command.DockerCli) {
 
 func runPlugin(cmd *command.DockerCli) error {
 	rootCmd := commands.NewRootCmd("buildx", true, cmd)
-	return plugin.RunPlugin(cmd, rootCmd, manager.Metadata{
+	return plugin.RunPlugin(cmd, rootCmd, metadata.Metadata{
 		SchemaVersion: "0.1.0",
 		Vendor:        "Docker Inc.",
 		Version:       version.Version,
@@ -105,7 +102,14 @@ func main() {
 		os.Exit(sterr.StatusCode)
 	}
 
-	for _, s := range errdefs.Sources(err) {
+	// Check for ExitCodeError, which is used to exit with a specific code
+	// without printing an error message.
+	var exitCodeErr cobrautil.ExitCodeError
+	if errors.As(err, &exitCodeErr) {
+		os.Exit(int(exitCodeErr))
+	}
+
+	for _, s := range solvererrdefs.Sources(err) {
 		s.Print(cmd.Err())
 	}
 	if debug.IsEnabled() {
@@ -117,12 +121,21 @@ func main() {
 	var ebr *desktop.ErrorWithBuildRef
 	if errors.As(err, &ebr) {
 		ebr.Print(cmd.Err())
-	} else {
-		var be *controllererrors.BuildError
-		if errors.As(err, &be) {
-			be.PrintBuildDetails(cmd.Err())
+	}
+
+	exitCode := 1
+	switch grpcerrors.Code(err) {
+	case codes.Internal:
+		exitCode = 100 // https://github.com/square/exit/blob/v1.3.0/exit.go#L70
+	case codes.ResourceExhausted:
+		exitCode = 102
+	case codes.Canceled:
+		exitCode = 130
+	default:
+		if errors.Is(err, context.Canceled) {
+			exitCode = 130
 		}
 	}
 
-	os.Exit(1)
+	os.Exit(exitCode)
 }

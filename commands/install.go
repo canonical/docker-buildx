@@ -47,8 +47,10 @@ func installCmd(dockerCli command.Cli) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runInstall(dockerCli, options)
 		},
-		Hidden:            true,
-		ValidArgsFunction: completion.Disable,
+		Deprecated:            "use 'docker buildx' directly, without relying on the 'docker builder' alias",
+		Hidden:                true,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	// hide builder persistent flag for this command

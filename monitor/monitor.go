@@ -4,44 +4,128 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"text/tabwriter"
+	"time"
 
 	"github.com/containerd/console"
 	"github.com/docker/buildx/build"
-	"github.com/docker/buildx/controller/control"
-	controllerapi "github.com/docker/buildx/controller/pb"
 	"github.com/docker/buildx/monitor/commands"
+	"github.com/docker/buildx/monitor/processes"
 	"github.com/docker/buildx/monitor/types"
 	"github.com/docker/buildx/util/ioset"
 	"github.com/docker/buildx/util/progress"
 	"github.com/google/shlex"
-	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/exporter/containerimage/exptypes"
+	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/identity"
+	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/term"
 )
 
-type MonitorBuildResult struct {
-	Resp *client.SolveResponse
-	Err  error
+var ErrReload = errors.New("monitor: reload")
+
+type Monitor struct {
+	invokeConfig *build.InvokeConfig
+	printer      *progress.Printer
+
+	stdin  *ioset.SingleForwarder
+	stdout io.WriteCloser
+	stderr io.WriteCloser
+}
+
+func New(cfg *build.InvokeConfig, stdin io.ReadCloser, stdout, stderr io.WriteCloser, printer *progress.Printer) *Monitor {
+	m := &Monitor{
+		invokeConfig: cfg,
+		printer:      printer,
+		stdin:        ioset.NewSingleForwarder(),
+		stdout:       stdout,
+		stderr:       stderr,
+	}
+	m.stdin.SetReader(stdin)
+	return m
+}
+
+func (m *Monitor) Handler() build.Handler {
+	return build.Handler{
+		Evaluate: m.Evaluate,
+	}
+}
+
+func (m *Monitor) Evaluate(ctx context.Context, _ string, c gateway.Client, res *gateway.Result, _ build.Options) error {
+	buildErr := res.EachRef(func(ref gateway.Reference) error {
+		return ref.Evaluate(ctx)
+	})
+
+	if m.invokeConfig.NeedsDebug(buildErr) {
+		// Allow some time to ensure status updates are sent.
+		time.Sleep(200 * time.Millisecond)
+
+		// Print errors before launching monitor
+		if err := printError(buildErr, m.printer); err != nil {
+			logrus.Warnf("failed to print error information: %v", err)
+		}
+
+		ps, err := exptypes.ParsePlatforms(res.Metadata)
+		if err != nil {
+			return err
+		}
+
+		ref, ok := res.FindRef(ps.Platforms[0].ID)
+		if !ok {
+			return errors.Errorf("no reference found for %s", ps.Platforms[0].ID)
+		}
+
+		rCtx := build.NewResultHandle(ctx, c, ref, res.Metadata, buildErr)
+		if monitorErr := m.Run(ctx, rCtx); monitorErr != nil {
+			if errors.Is(monitorErr, build.ErrRestart) {
+				return build.ErrRestart
+			}
+			logrus.Warnf("failed to run monitor: %v", monitorErr)
+		}
+	}
+	return buildErr
+}
+
+func (m *Monitor) Run(ctx context.Context, rCtx *build.ResultHandle) error {
+	if rCtx != nil {
+		defer rCtx.Done()
+	}
+
+	pr, pw := io.Pipe()
+	m.stdin.SetWriter(pw, func() io.WriteCloser {
+		pw.Close() // propagate EOF
+		return nil
+	})
+
+	con := console.Current()
+	if err := con.SetRaw(); err != nil {
+		return errors.Errorf("failed to configure terminal: %v", err)
+	}
+	defer con.Reset()
+
+	monitorErr := RunMonitor(ctx, m.invokeConfig, rCtx, pr, m.stdout, m.stderr, m.printer)
+	if err := pw.Close(); err != nil {
+		logrus.Debug("failed to close monitor stdin pipe reader")
+	}
+	return monitorErr
+}
+
+func (m *Monitor) Close() error {
+	return m.stdin.Close()
 }
 
 // RunMonitor provides an interactive session for running and managing containers via specified IO.
-func RunMonitor(ctx context.Context, curRef string, options *controllerapi.BuildOptions, invokeConfig *controllerapi.InvokeConfig, c control.BuildxController, stdin io.ReadCloser, stdout io.WriteCloser, stderr console.File, progress *progress.Printer) (*MonitorBuildResult, error) {
-	defer func() {
-		if err := c.Disconnect(ctx, curRef); err != nil {
-			logrus.Warnf("disconnect error: %v", err)
-		}
-	}()
+func RunMonitor(ctx context.Context, invokeConfig *build.InvokeConfig, rCtx *build.ResultHandle, stdin io.ReadCloser, stdout, stderr io.WriteCloser, progress *progress.Printer) error {
+	progress.Pause()
+	defer progress.Resume()
 
-	if err := progress.Pause(); err != nil {
-		return nil, err
-	}
-	defer progress.Unpause()
+	defer stdin.Close()
 
 	monitorIn, monitorOut := ioset.Pipe()
 	defer func() {
@@ -69,8 +153,9 @@ func RunMonitor(ctx context.Context, curRef string, options *controllerapi.Build
 	invokeForwarder := ioset.NewForwarder()
 	invokeForwarder.SetIn(&containerIn)
 	m := &monitor{
-		BuildxController: c,
-		invokeIO:         invokeForwarder,
+		rCtx:      rCtx,
+		processes: processes.NewManager(),
+		invokeIO:  invokeForwarder,
 		muxIO: ioset.NewMuxIO(ioset.In{
 			Stdin:  io.NopCloser(stdin),
 			Stdout: nopCloser{stdout},
@@ -83,7 +168,13 @@ func RunMonitor(ctx context.Context, curRef string, options *controllerapi.Build
 			return "Switched IO\n"
 		}),
 	}
-	m.ref.Store(curRef)
+	m.ctx, m.cancel = context.WithCancelCause(context.Background())
+
+	defer func() {
+		if err := m.Close(); err != nil {
+			logrus.Warnf("close error: %v", err)
+		}
+	}()
 
 	// Start container automatically
 	fmt.Fprintf(stdout, "Launching interactive container. Press Ctrl-a-c to switch to monitor console\n")
@@ -93,11 +184,8 @@ func RunMonitor(ctx context.Context, curRef string, options *controllerapi.Build
 	fmt.Fprintf(stdout, "Interactive container was restarted with process %q. Press Ctrl-a-c to switch to the new container\n", id)
 
 	availableCommands := []types.Command{
-		commands.NewReloadCmd(m, stdout, progress, options, invokeConfig),
+		commands.NewReloadCmd(m),
 		commands.NewRollbackCmd(m, invokeConfig, stdout),
-		commands.NewListCmd(m, stdout),
-		commands.NewDisconnectCmd(m),
-		commands.NewKillCmd(m),
 		commands.NewAttachCmd(m, stdout),
 		commands.NewExecCmd(m, invokeConfig, stdout),
 		commands.NewPsCmd(m, stdout),
@@ -128,6 +216,11 @@ func RunMonitor(ctx context.Context, curRef string, options *controllerapi.Build
 			}()
 			t := term.NewTerminal(readWriter{in.Stdin, in.Stdout}, "(buildx) ")
 			for {
+				if err := m.ctx.Err(); err != nil {
+					errCh <- context.Cause(m.ctx)
+					return
+				}
+
 				l, err := t.ReadLine()
 				if err != nil {
 					if err != io.EOF {
@@ -176,10 +269,10 @@ func RunMonitor(ctx context.Context, curRef string, options *controllerapi.Build
 		select {
 		case <-doneCh:
 			m.close()
-			return m.lastBuildResult, nil
+			return nil
 		case err := <-errCh:
 			m.close()
-			return m.lastBuildResult, err
+			return err
 		case <-monitorDisableCh:
 		}
 		monitorForwarder.SetOut(nil)
@@ -233,54 +326,70 @@ type readWriter struct {
 }
 
 type monitor struct {
-	control.BuildxController
-	ref atomic.Value
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+
+	rCtx *build.ResultHandle
 
 	muxIO        *ioset.MuxIO
 	invokeIO     *ioset.Forwarder
 	invokeCancel func()
 	attachedPid  atomic.Value
 
-	lastBuildResult *MonitorBuildResult
+	processes *processes.Manager
 }
 
-func (m *monitor) Build(ctx context.Context, options *controllerapi.BuildOptions, in io.ReadCloser, progress progress.Writer) (ref string, resp *client.SolveResponse, input *build.Inputs, err error) {
-	ref, resp, _, err = m.BuildxController.Build(ctx, options, in, progress)
-	m.lastBuildResult = &MonitorBuildResult{Resp: resp, Err: err} // Record build result
-	return
+func (m *monitor) Invoke(ctx context.Context, pid string, cfg *build.InvokeConfig, ioIn io.ReadCloser, ioOut io.WriteCloser, ioErr io.WriteCloser) error {
+	proc, ok := m.processes.Get(pid)
+	if !ok {
+		// Start a new process.
+		if m.rCtx == nil {
+			return errors.New("no build result is registered")
+		}
+		var err error
+		proc, err = m.processes.StartProcess(pid, m.rCtx, cfg)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Attach containerIn to this process
+	ioCancelledCh := make(chan struct{})
+	proc.ForwardIO(&ioset.In{Stdin: ioIn, Stdout: ioOut, Stderr: ioErr}, func(error) { close(ioCancelledCh) })
+
+	select {
+	case <-ioCancelledCh:
+		return errors.Errorf("io cancelled")
+	case err := <-proc.Done():
+		return err
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
-func (m *monitor) DisconnectSession(ctx context.Context, targetID string) error {
-	return m.Disconnect(ctx, targetID)
-}
-
-func (m *monitor) AttachSession(ref string) {
-	m.ref.Store(ref)
-}
-
-func (m *monitor) AttachedSessionID() string {
-	return m.ref.Load().(string)
-}
-
-func (m *monitor) Rollback(ctx context.Context, cfg *controllerapi.InvokeConfig) string {
+func (m *monitor) Rollback(ctx context.Context, cfg *build.InvokeConfig) string {
 	pid := identity.NewID()
 	cfg1 := cfg
 	cfg1.Rollback = true
 	return m.startInvoke(ctx, pid, cfg1)
 }
 
-func (m *monitor) Exec(ctx context.Context, cfg *controllerapi.InvokeConfig) string {
+func (m *monitor) Exec(ctx context.Context, cfg *build.InvokeConfig) string {
 	return m.startInvoke(ctx, identity.NewID(), cfg)
 }
 
 func (m *monitor) Attach(ctx context.Context, pid string) {
-	m.startInvoke(ctx, pid, &controllerapi.InvokeConfig{})
+	m.startInvoke(ctx, pid, &build.InvokeConfig{})
 }
 
 func (m *monitor) Detach() {
 	if m.invokeCancel != nil {
 		m.invokeCancel() // Finish existing attach
 	}
+}
+
+func (m *monitor) Reload() {
+	m.cancel(build.ErrRestart)
 }
 
 func (m *monitor) AttachedPID() string {
@@ -291,7 +400,7 @@ func (m *monitor) close() {
 	m.Detach()
 }
 
-func (m *monitor) startInvoke(ctx context.Context, pid string, cfg *controllerapi.InvokeConfig) string {
+func (m *monitor) startInvoke(ctx context.Context, pid string, cfg *build.InvokeConfig) string {
 	if m.invokeCancel != nil {
 		m.invokeCancel() // Finish existing attach
 	}
@@ -317,14 +426,11 @@ func (m *monitor) startInvoke(ctx context.Context, pid string, cfg *controllerap
 	return pid
 }
 
-func (m *monitor) invoke(ctx context.Context, pid string, cfg *controllerapi.InvokeConfig) error {
+func (m *monitor) invoke(ctx context.Context, pid string, cfg *build.InvokeConfig) error {
 	m.muxIO.Enable(1)
 	defer m.muxIO.Disable(1)
 	if err := m.muxIO.SwitchTo(1); err != nil {
 		return errors.Errorf("failed to switch to process IO: %v", err)
-	}
-	if m.AttachedSessionID() == "" {
-		return nil
 	}
 	invokeCtx, invokeCancel := context.WithCancelCause(ctx)
 
@@ -343,10 +449,27 @@ func (m *monitor) invoke(ctx context.Context, pid string, cfg *controllerapi.Inv
 	defer invokeCancelAndDetachFn()
 	m.invokeCancel = invokeCancelAndDetachFn
 
-	err := m.Invoke(invokeCtx, m.AttachedSessionID(), pid, cfg, containerIn.Stdin, containerIn.Stdout, containerIn.Stderr)
+	err := m.Invoke(invokeCtx, pid, cfg, containerIn.Stdin, containerIn.Stdout, containerIn.Stderr)
 	close(waitInvokeDoneCh)
 
 	return err
+}
+
+func (m *monitor) Close() error {
+	m.cancelRunningProcesses()
+	return nil
+}
+
+func (m *monitor) ListProcesses(ctx context.Context) (infos []*processes.ProcessInfo, retErr error) {
+	return m.processes.ListProcesses(), nil
+}
+
+func (m *monitor) DisconnectProcess(ctx context.Context, pid string) error {
+	return m.processes.DeleteProcess(pid)
+}
+
+func (m *monitor) cancelRunningProcesses() {
+	m.processes.CancelRunningProcesses()
 }
 
 type nopCloser struct {
@@ -354,3 +477,18 @@ type nopCloser struct {
 }
 
 func (c nopCloser) Close() error { return nil }
+
+func printError(err error, printer *progress.Printer) error {
+	if err == nil {
+		return nil
+	}
+
+	printer.Pause()
+	defer printer.Resume()
+
+	for _, s := range errdefs.Sources(err) {
+		s.Print(os.Stderr)
+	}
+	fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+	return nil
+}

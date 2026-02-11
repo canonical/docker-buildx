@@ -21,7 +21,7 @@
   - [Verify essential information](#verify-essential-information)
   - [Classify the issue](#classify-the-issue)
 - [Prioritization guidelines for `kind/bug`](#prioritization-guidelines-for-kindbug)
-- [Issue lifecyle](#issue-lifecyle)
+- [Issue lifecycle](#issue-lifecycle)
   - [Examples](#examples)
     - [Submitting a bug](#submitting-a-bug)
 - [Pull request review process](#pull-request-review-process)
@@ -79,7 +79,6 @@ Area or component of the project affected. Please note that the table below may 
 | `area/checks`                  | Any        | `checks`                   |
 | `area/ci`                      | Any        | Project CI                 |
 | `area/cli`                     | Any        | `cli`                      |
-| `area/controller`              | Any        | `controller`               |
 | `area/debug`                   | Any        | `debug`                    |
 | `area/dependencies`            | Any        | Project dependencies       |
 | `area/dockerfile`              | Any        | `dockerfile`               |
@@ -308,7 +307,7 @@ Examples:
 - Bugs in non-default configurations
 - Most enhancements
 
-## Issue lifecyle
+## Issue lifecycle
 
 ```mermaid
 flowchart LR

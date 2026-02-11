@@ -16,6 +16,8 @@ func RootCmd(rootcmd *cobra.Command, dockerCli command.Cli, opts RootOptions) *c
 		Short:             "Commands to work on build records",
 		ValidArgsFunction: completion.Disable,
 		RunE:              rootcmd.RunE,
+
+		DisableFlagsInUseLine: true,
 	}
 
 	cmd.AddCommand(
@@ -25,6 +27,8 @@ func RootCmd(rootcmd *cobra.Command, dockerCli command.Cli, opts RootOptions) *c
 		inspectCmd(dockerCli, opts),
 		openCmd(dockerCli, opts),
 		traceCmd(dockerCli, opts),
+		importCmd(dockerCli, opts),
+		exportCmd(dockerCli, opts),
 	)
 
 	return cmd

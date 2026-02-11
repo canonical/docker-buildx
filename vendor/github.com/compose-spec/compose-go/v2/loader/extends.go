@@ -27,10 +27,6 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 )
 
-// as we use another service definition by `extends`, we must exclude attributes which creates dependency to another service
-// see https://github.com/compose-spec/compose-spec/blob/main/05-services.md#restrictions
-var exclusions = []string{"depends_on", "volumes_from"}
-
 func ApplyExtends(ctx context.Context, dict map[string]any, opts *Options, tracker *cycleTracker, post ...PostProcessor) error {
 	a, ok := dict["services"]
 	if !ok {
@@ -72,7 +68,10 @@ func applyServiceExtends(ctx context.Context, name string, services map[string]a
 	)
 	switch v := extends.(type) {
 	case map[string]any:
-		ref = v["service"].(string)
+		ref, ok = v["service"].(string)
+		if !ok {
+			return nil, fmt.Errorf("extends.%s.service is required", name)
+		}
 		file = v["file"]
 		opts.ProcessEvent("extends", v)
 	case string:
@@ -82,13 +81,12 @@ func applyServiceExtends(ctx context.Context, name string, services map[string]a
 
 	var (
 		base      any
-		processor PostProcessor
+		processor PostProcessor = NoopPostProcessor{}
 	)
 
 	if file != nil {
 		refFilename := file.(string)
 		services, processor, err = getExtendsBaseFromFile(ctx, name, ref, filename, refFilename, opts, tracker)
-		post = append(post, processor)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +104,7 @@ func applyServiceExtends(ctx context.Context, name string, services map[string]a
 	}
 
 	// recursively apply `extends`
-	base, err = applyServiceExtends(ctx, ref, services, opts, tracker, post...)
+	base, err = applyServiceExtends(ctx, ref, services, opts, tracker, processor)
 	if err != nil {
 		return nil, err
 	}
@@ -117,14 +115,14 @@ func applyServiceExtends(ctx context.Context, name string, services map[string]a
 	source := deepClone(base).(map[string]any)
 
 	for _, processor := range post {
-		processor.Apply(map[string]any{
+		err = processor.Apply(map[string]any{
 			"services": map[string]any{
 				name: source,
 			},
 		})
-	}
-	for _, exclusion := range exclusions {
-		delete(source, exclusion)
+		if err != nil {
+			return nil, err
+		}
 	}
 	merged, err := override.ExtendService(source, service)
 	if err != nil {

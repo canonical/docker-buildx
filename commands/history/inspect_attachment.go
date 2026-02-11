@@ -3,15 +3,14 @@ package history
 import (
 	"context"
 	"io"
-	"slices"
 
 	"github.com/containerd/containerd/v2/core/content/proxy"
 	"github.com/containerd/platforms"
-	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/cli/cli/command"
 	intoto "github.com/in-toto/in-toto-golang/in_toto"
 	slsa02 "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v0.2"
+	slsa1 "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v1"
 	"github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -27,22 +26,12 @@ type attachmentOptions struct {
 }
 
 func runAttachment(ctx context.Context, dockerCli command.Cli, opts attachmentOptions) error {
-	b, err := builder.New(dockerCli, builder.WithName(opts.builder))
+	nodes, err := loadNodes(ctx, dockerCli, opts.builder)
 	if err != nil {
 		return err
 	}
 
-	nodes, err := b.LoadNodes(ctx)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if node.Err != nil {
-			return node.Err
-		}
-	}
-
-	recs, err := queryRecords(ctx, opts.ref, nodes)
+	recs, err := queryRecords(ctx, opts.ref, nodes, nil)
 	if err != nil {
 		return err
 	}
@@ -52,12 +41,6 @@ func runAttachment(ctx context.Context, dockerCli command.Cli, opts attachmentOp
 			return errors.New("no records found")
 		}
 		return errors.Errorf("no record found for ref %q", opts.ref)
-	}
-
-	if opts.ref == "" {
-		slices.SortFunc(recs, func(a, b historyRecord) int {
-			return b.CreatedAt.AsTime().Compare(a.CreatedAt.AsTime())
-		})
 	}
 
 	rec := &recs[0]
@@ -83,25 +66,30 @@ func runAttachment(ctx context.Context, dockerCli command.Cli, opts attachmentOp
 		return err
 	}
 
-	typ := opts.typ
-	switch typ {
+	types := make(map[string]struct{})
+	switch opts.typ {
 	case "index":
-		typ = ocispecs.MediaTypeImageIndex
+		types[ocispecs.MediaTypeImageIndex] = struct{}{}
 	case "manifest":
-		typ = ocispecs.MediaTypeImageManifest
+		types[ocispecs.MediaTypeImageManifest] = struct{}{}
 	case "image":
-		typ = ocispecs.MediaTypeImageConfig
+		types[ocispecs.MediaTypeImageConfig] = struct{}{}
 	case "provenance":
-		typ = slsa02.PredicateSLSAProvenance
+		types[slsa1.PredicateSLSAProvenance] = struct{}{}
+		types[slsa02.PredicateSLSAProvenance] = struct{}{}
 	case "sbom":
-		typ = intoto.PredicateSPDX
+		types[intoto.PredicateSPDX] = struct{}{}
+	default:
+		if opts.typ != "" {
+			types[opts.typ] = struct{}{}
+		}
 	}
 
 	for _, a := range attachments {
 		if opts.platform != "" && (a.platform == nil || platforms.FormatAll(*a.platform) != opts.platform) {
 			continue
 		}
-		if typ != "" && descrType(a.descr) != typ {
+		if _, ok := types[descrType(a.descr)]; opts.typ != "" && !ok {
 			continue
 		}
 		ra, err := store.ReaderAt(ctx, a.descr)
@@ -119,9 +107,9 @@ func attachmentCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 	var options attachmentOptions
 
 	cmd := &cobra.Command{
-		Use:   "attachment [OPTIONS] REF [DIGEST]",
-		Short: "Inspect a build attachment",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:   "attachment [OPTIONS] [REF [DIGEST]]",
+		Short: "Inspect a build record attachment",
+		Args:  cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				options.ref = args[0]
@@ -141,7 +129,8 @@ func attachmentCmd(dockerCli command.Cli, rootOpts RootOptions) *cobra.Command {
 			options.builder = *rootOpts.Builder
 			return runAttachment(cmd.Context(), dockerCli, options)
 		},
-		ValidArgsFunction: completion.Disable,
+		ValidArgsFunction:     completion.Disable,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()

@@ -1,10 +1,11 @@
-docker-buildx (0.21.3-0ubuntu1~22.04.1) jammy; urgency=medium
+docker-buildx (0.30.1-0ubuntu1) resolute; urgency=medium
 
-  * Backport from questing to jammy (LP: #2112523)
-  * d/control: build with golang 1.23
-  * d/rules: add golang 1.23 to PATH
+  * New upstream version 0.30.1
+  * d/docker-buildx.docs: update NOTICE files
+  * d/s/lintian-overrides: ignore vendored code long lines
+  * d/copyright: update copyright data
 
- -- Athos Ribeiro <athos.ribeiro@canonical.com>  Wed, 10 Sep 2025 16:59:48 -0300
+ -- Athos Ribeiro <athos@ubuntu.com>  Tue, 16 Dec 2025 12:03:00 -0300
 
 docker-buildx (0.21.3-0ubuntu1) questing; urgency=medium
 
