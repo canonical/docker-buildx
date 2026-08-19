@@ -19,11 +19,13 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/content/proxy"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/pkg/epoch"
 	"github.com/containerd/platforms"
 	"github.com/docker/buildx/localstate"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/desktop"
+	historyutil "github.com/docker/buildx/util/history"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/formatter"
 	"github.com/docker/cli/cli/debug"
@@ -108,6 +110,13 @@ type configOutput struct {
 
 	ShmSize               string `json:",omitempty"`
 	Ulimit                string `json:",omitempty"`
+	Memory                string `json:",omitempty"`
+	MemorySwap            string `json:",omitempty"`
+	CPUShares             string `json:",omitempty"`
+	CPUPeriod             string `json:",omitempty"`
+	CPUQuota              string `json:",omitempty"`
+	CPUSetCPUs            string `json:",omitempty"`
+	CPUSetMems            string `json:",omitempty"`
 	CacheMountNS          string `json:",omitempty"`
 	DockerfileCheckConfig string `json:",omitempty"`
 	SourceDateEpoch       string `json:",omitempty"`
@@ -243,7 +252,7 @@ workers0:
 	}
 	delete(attrs, "filename")
 
-	out.Name = BuildName(rec.FrontendAttrs, st)
+	out.Name = historyutil.BuildName(rec.FrontendAttrs, st)
 	out.Ref = rec.Ref
 
 	out.Context = context
@@ -389,9 +398,16 @@ workers0:
 
 	readAttr(attrs, "shm-size", &out.Config.ShmSize, nil)
 	readAttr(attrs, "ulimit", &out.Config.Ulimit, nil)
+	readAttr(attrs, "memory", &out.Config.Memory, nil)
+	readAttr(attrs, "memswap", &out.Config.MemorySwap, nil)
+	readAttr(attrs, "cpushares", &out.Config.CPUShares, nil)
+	readAttr(attrs, "cpuperiod", &out.Config.CPUPeriod, nil)
+	readAttr(attrs, "cpuquota", &out.Config.CPUQuota, nil)
+	readAttr(attrs, "cpusetcpus", &out.Config.CPUSetCPUs, nil)
+	readAttr(attrs, "cpusetmems", &out.Config.CPUSetMems, nil)
 	readAttr(attrs, "build-arg:BUILDKIT_CACHE_MOUNT_NS", &out.Config.CacheMountNS, nil)
 	readAttr(attrs, "build-arg:BUILDKIT_DOCKERFILE_CHECK", &out.Config.DockerfileCheckConfig, nil)
-	readAttr(attrs, "build-arg:SOURCE_DATE_EPOCH", &out.Config.SourceDateEpoch, nil)
+	readAttr(attrs, "build-arg:"+epoch.SourceDateEpochEnv, &out.Config.SourceDateEpoch, nil)
 	readAttr(attrs, "build-arg:SANDBOX_HOSTNAME", &out.Config.SandboxHostname, nil)
 
 	var unusedAttrs []keyValueOutput
@@ -567,6 +583,27 @@ workers0:
 	}
 	if out.Config.Ulimit != "" {
 		fmt.Fprintf(tw, "Resource Limits:\t%s\n", out.Config.Ulimit)
+	}
+	if out.Config.Memory != "" {
+		fmt.Fprintf(tw, "Memory:\t%s\n", humanizeBytes(out.Config.Memory))
+	}
+	if out.Config.MemorySwap != "" {
+		fmt.Fprintf(tw, "Memory Swap:\t%s\n", humanizeBytes(out.Config.MemorySwap))
+	}
+	if out.Config.CPUShares != "" {
+		fmt.Fprintf(tw, "CPU Shares:\t%s\n", out.Config.CPUShares)
+	}
+	if out.Config.CPUPeriod != "" {
+		fmt.Fprintf(tw, "CPU Period:\t%s\n", out.Config.CPUPeriod)
+	}
+	if out.Config.CPUQuota != "" {
+		fmt.Fprintf(tw, "CPU Quota:\t%s\n", out.Config.CPUQuota)
+	}
+	if out.Config.CPUSetCPUs != "" {
+		fmt.Fprintf(tw, "CPUSet CPUs:\t%s\n", out.Config.CPUSetCPUs)
+	}
+	if out.Config.CPUSetMems != "" {
+		fmt.Fprintf(tw, "CPUSet Mems:\t%s\n", out.Config.CPUSetMems)
 	}
 	if out.Config.CacheMountNS != "" {
 		fmt.Fprintf(tw, "Cache Mount Namespace:\t%s\n", out.Config.CacheMountNS)

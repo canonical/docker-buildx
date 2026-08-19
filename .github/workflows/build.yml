@@ -1,11 +1,5 @@
 name: build
 
-# Default to 'contents: read', which grants actions to read commits.
-#
-# If any permission is set, any permission not included in the list is
-# implicitly set to "none".
-#
-# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
 permissions:
   contents: read
 
@@ -23,7 +17,6 @@ on:
       - 'v*'
   pull_request:
     paths-ignore:
-      - '.github/releases.json'
       - 'README.md'
       - 'docs/**'
 
@@ -36,7 +29,7 @@ env:
   TEST_CACHE_SCOPE: "test"
   TESTFLAGS: "-v --parallel=6 --timeout=30m"
   GOTESTSUM_FORMAT: "standard-verbose"
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26"
   GOTESTSUM_VERSION: "v1.13.0"  # same as one in Dockerfile
 
 jobs:
@@ -54,9 +47,9 @@ jobs:
           - master
           - latest
           - buildx-stable-1
-          - v0.25.2
-          - v0.24.0
-          - v0.23.2
+          - v0.29.0
+          - v0.28.1
+          - v0.27.1
         worker:
           - docker-container
           - remote
@@ -66,14 +59,29 @@ jobs:
           - ""
           - experimental
         include:
-          - worker: docker
+          - worker: remote+multinode
             pkg: ./tests
-          - worker: docker+containerd  # same as docker, but with containerd snapshotter
+          - worker: remote+multinode
+            pkg: ./tests
+            mode: experimental
+          - worker: docker
             pkg: ./tests
           - worker: docker
             pkg: ./tests
             mode: experimental
           - worker: docker+containerd  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+          - worker: docker+containerd  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+            mode: experimental
+          - worker: "docker@28.5"
+            pkg: ./tests
+          - worker: "docker+containerd@28.5"  # same as docker, but with containerd snapshotter
+            pkg: ./tests
+          - worker: "docker@28.5"
+            pkg: ./tests
+            mode: experimental
+          - worker: "docker+containerd@28.5"  # same as docker, but with containerd snapshotter
             pkg: ./tests
             mode: experimental
           - worker: "docker@27.5"
@@ -84,16 +92,6 @@ jobs:
             pkg: ./tests
             mode: experimental
           - worker: "docker+containerd@27.5"  # same as docker, but with containerd snapshotter
-            pkg: ./tests
-            mode: experimental
-          - worker: "docker@26.1"
-            pkg: ./tests
-          - worker: "docker+containerd@26.1"  # same as docker, but with containerd snapshotter
-            pkg: ./tests
-          - worker: "docker@26.1"
-            pkg: ./tests
-            mode: experimental
-          - worker: "docker+containerd@26.1"  # same as docker, but with containerd snapshotter
             pkg: ./tests
             mode: experimental
     steps:
@@ -106,14 +104,14 @@ jobs:
           fi
           testFlags="--run=//worker=$(echo "${{ matrix.worker }}" | sed 's/\+/\\+/g')$"
           case "${{ matrix.worker }}" in
-            docker | docker+containerd | docker@* | docker+containerd@*)
+            docker | docker+containerd | docker@* | docker+containerd@* | remote+multinode)
               echo "TESTFLAGS=${{ env.TESTFLAGS_DOCKER }} $testFlags" >> $GITHUB_ENV
               ;;
             *)
               echo "TESTFLAGS=${{ env.TESTFLAGS }} $testFlags" >> $GITHUB_ENV
               ;;
           esac
-          if [[ "${{ matrix.worker }}" == "docker"* ]]; then
+          if [[ "${{ matrix.worker }}" == "docker"* || "${{ matrix.worker }}" == "remote+multinode" ]]; then
             echo "TEST_DOCKERD=1" >> $GITHUB_ENV
           fi
           if [ "${{ matrix.mode }}" = "experimental" ]; then
@@ -121,22 +119,22 @@ jobs:
           fi
       -
         name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           version: ${{ env.SETUP_BUILDX_VERSION }}
           driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
           buildkitd-flags: --debug
       -
         name: Build test image
-        uses: docker/bake-action@v6
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
           source: .
           targets: integration-test
@@ -150,24 +148,34 @@ jobs:
           TEST_REPORT_SUFFIX: "-${{ env.TESTREPORTS_NAME }}"
           TESTPKGS: "${{ matrix.pkg }}"
       -
-        name: Send to Codecov
+        name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           directory: ./bin/testreports
           flags: integration
           token: ${{ secrets.CODECOV_TOKEN }}
-          disable_file_fixes: true
+          disable_file_fixes: true # needed for Go language https://docs.codecov.com/docs/fixing-reports
+      -
+        name: Upload test results to Codecov
+        if: always()
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          report_type: test_results
+          directory: ./bin/testreports
+          flags: integration
+          token: ${{ secrets.CODECOV_TOKEN }}
+          disable_file_fixes: true # needed for Go language https://docs.codecov.com/docs/fixing-reports
       -
         name: Generate annotations
         if: always()
-        uses: crazy-max/.github/.github/actions/gotest-annotations@fa6141aedf23596fb8bdcceab9cce8dadaa31bd9
+        uses: crazy-max/.github/.github/actions/gotest-annotations@46267a6e61cd56aac2fc79943df180152f4c89d6 # v1.10.1
         with:
           directory: ./bin/testreports
       -
         name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-reports-${{ env.TESTREPORTS_NAME }}
           path: ./bin/testreports
@@ -179,8 +187,8 @@ jobs:
       matrix:
         os:
           - ubuntu-24.04
-          - macos-14
-          - windows-2022
+          - macos-15
+          - windows-2025
     env:
       SKIP_INTEGRATION_TESTS: 1
     steps:
@@ -191,10 +199,10 @@ jobs:
           git config --global core.eol lf
       -
         name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "${{ env.GO_VERSION }}"
       -
@@ -227,95 +235,39 @@ jobs:
               "-covermode" "atomic" ${{ env.TESTFLAGS }}
         shell: bash
       -
-        name: Send to Codecov
+        name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           directory: ${{ env.TESTREPORTS_DIR }}
           env_vars: RUNNER_OS
           flags: unit
           token: ${{ secrets.CODECOV_TOKEN }}
-          disable_file_fixes: true
+          disable_file_fixes: true # needed for Go language https://docs.codecov.com/docs/fixing-reports
+      -
+        name: Upload test results to Codecov
+        if: always()
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          report_type: test_results
+          directory: ${{ env.TESTREPORTS_DIR }}
+          env_vars: RUNNER_OS
+          flags: unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+          disable_file_fixes: true # needed for Go language https://docs.codecov.com/docs/fixing-reports
       -
         name: Generate annotations
         if: always()
-        uses: crazy-max/.github/.github/actions/gotest-annotations@fa6141aedf23596fb8bdcceab9cce8dadaa31bd9
+        uses: crazy-max/.github/.github/actions/gotest-annotations@46267a6e61cd56aac2fc79943df180152f4c89d6 # v1.10.1
         with:
           directory: ${{ env.TESTREPORTS_DIR }}
       -
         name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-reports-${{ env.TESTREPORTS_NAME }}
           path: ${{ env.TESTREPORTS_BASEDIR }}
-
-  test-bsd-unit:
-    runs-on: ubuntu-22.04
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - freebsd
-          - netbsd
-          - openbsd
-    env:
-      # https://github.com/hashicorp/vagrant/issues/13652
-      VAGRANT_DISABLE_STRICT_DEPENDENCY_ENFORCEMENT: 1
-    steps:
-      -
-        name: Prepare
-        run: |
-          echo "VAGRANT_FILE=hack/Vagrantfile.${{ matrix.os }}" >> $GITHUB_ENV
-          
-          # Sets semver Go version to be able to download tarball during vagrant setup
-          goVersion=$(curl --silent "https://go.dev/dl/?mode=json&include=all" | jq -r '.[].files[].version' | uniq | sed -e 's/go//' | sort -V | grep $GO_VERSION | tail -1)
-          echo "GO_VERSION=$goVersion" >> $GITHUB_ENV
-      -
-        name: Checkout
-        uses: actions/checkout@v5
-      -
-        name: Cache Vagrant boxes
-        uses: actions/cache@v4
-        with:
-          path: ~/.vagrant.d/boxes
-          key: ${{ runner.os }}-vagrant-${{ matrix.os }}-${{ hashFiles(env.VAGRANT_FILE) }}
-          restore-keys: |
-            ${{ runner.os }}-vagrant-${{ matrix.os }}-
-      -
-        name: Install vagrant
-        run: |
-          set -x
-          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev libvirt-daemon libvirt-daemon-system vagrant vagrant-libvirt ruby-libvirt
-          sudo systemctl enable --now libvirtd
-          sudo chmod a+rw /var/run/libvirt/libvirt-sock
-          vagrant plugin install vagrant-libvirt
-          vagrant --version
-      -
-        name: Set up vagrant
-        run: |
-          ln -sf ${{ env.VAGRANT_FILE }} Vagrantfile
-          vagrant up --no-tty
-      -
-        name: Test
-        run: |
-          vagrant ssh -- "cd /vagrant; SKIP_INTEGRATION_TESTS=1 go test -mod=vendor -coverprofile=coverage.txt -covermode=atomic ${{ env.TESTFLAGS }} ./..."
-          vagrant ssh -c "sudo cat /vagrant/coverage.txt" > coverage.txt
-      -
-        name: Upload coverage
-        if: always()
-        uses: codecov/codecov-action@v5
-        with:
-          files: ./coverage.txt
-          env_vars: RUNNER_OS
-          flags: unit,${{ matrix.os }}
-          token: ${{ secrets.CODECOV_TOKEN }}
-        env:
-          RUNNER_OS: ${{ matrix.os }}
 
   govulncheck:
     runs-on: ubuntu-24.04
@@ -327,14 +279,14 @@ jobs:
     steps:
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           version: ${{ env.SETUP_BUILDX_VERSION }}
           driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
           buildkitd-flags: --debug
       -
         name: Run
-        uses: docker/bake-action@v6
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
           targets: govulncheck
         env:
@@ -342,133 +294,121 @@ jobs:
       -
         name: Upload SARIF report
         if: ${{ github.ref == 'refs/heads/master' && github.repository == 'docker/buildx' }}
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: ${{ env.DESTDIR }}/govulncheck.out
 
-  prepare-binaries:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.platforms.outputs.matrix }}
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v5
-      -
-        name: Create matrix
-        id: platforms
-        run: |
-          echo "matrix=$(docker buildx bake binaries-cross --print | jq -cr '.target."binaries-cross".platforms')" >>${GITHUB_OUTPUT}
-      -
-        name: Show matrix
-        run: |
-          echo ${{ steps.platforms.outputs.matrix }}
-
   binaries:
+    uses: docker/github-builder/.github/workflows/bake.yml@3415a188caae9a0da7fba83bc06985776e0b1790 # v1.14.0
+    permissions:
+      contents: read # same as global permission
+      id-token: write # for signing attestation(s) with GitHub OIDC Token
+    with:
+      runner: amd64
+      artifact-name: buildx
+      artifact-upload: true
+      cache: true
+      cache-scope: bin-image
+      target: release
+      output: local
+      sbom: true
+      sign: ${{ github.event_name != 'pull_request' }}
+
+  binaries-finalize:
     runs-on: ubuntu-24.04
     needs:
-      - prepare-binaries
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: ${{ fromJson(needs.prepare-binaries.outputs.matrix) }}
+      - binaries
     steps:
       -
-        name: Prepare
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-      -
-        name: Checkout
-        uses: actions/checkout@v5
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          version: ${{ env.SETUP_BUILDX_VERSION }}
-          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
-          buildkitd-flags: --debug
+          path: /tmp/buildx-output
+          name: ${{ needs.binaries.outputs.artifact-name }}
       -
-        name: Build
+        name: Rename provenance and sbom
         run: |
-          make release
-        env:
-          PLATFORMS: ${{ matrix.platform }}
-          CACHE_FROM: type=gha,scope=binaries-${{ env.PLATFORM_PAIR }}
-          CACHE_TO: type=gha,scope=binaries-${{ env.PLATFORM_PAIR }},mode=max
+          for pdir in /tmp/buildx-output/*/; do
+            (
+              cd "$pdir"
+              binname=$(find . -name 'buildx-*')
+              filename=$(basename "${binname%.exe}")
+              mv "provenance.json" "${filename}.provenance.json"
+              mv "sbom-binaries.spdx.json" "${filename}.sbom.json"
+              find . -name 'sbom*.json' -exec rm {} \;
+              if [[ "$binname" == *darwin* ]] || [[ "$binname" == *windows* ]]; then
+                rm -f "provenance.sigstore.json"
+              elif [ -f "provenance.sigstore.json" ]; then
+                mv "provenance.sigstore.json" "${filename}.sigstore.json"
+              fi
+            )
+          done
+          mkdir -p "${{ env.DESTDIR }}"
+          mv /tmp/buildx-output/**/* "${{ env.DESTDIR }}/"
       -
-        name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        name: Create checksums
+        working-directory: ${{ env.DESTDIR }}
+        run: |
+          sha256sum -b buildx-* > ./checksums.txt
+          sed -i -e '/darwin/d' -e '/windows/d' ./checksums.txt
+          sha256sum -c --strict checksums.txt
+      -
+        name: List artifacts
+        working-directory: ${{ env.DESTDIR }}
+        run: |
+          tree -nh .
+      -
+        name: Check artifacts
+        working-directory: ${{ env.DESTDIR }}
+        run: |
+          find . -type f -exec file -e ascii -- {} +
+      -
+        name: Upload release binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: buildx-${{ env.PLATFORM_PAIR }}
+          name: release
           path: ${{ env.DESTDIR }}/*
           if-no-files-found: error
 
-  bin-image:
+  bin-image-prepare:
     runs-on: ubuntu-24.04
+    outputs:
+      repo-slug: ${{ env.REPO_SLUG }}
+    steps:
+      # FIXME: can't use env object in reusable workflow inputs: https://github.com/orgs/community/discussions/26671
+      - run: echo "Exposing env vars for reusable workflow"
+
+  bin-image:
+    if: ${{ github.repository == 'docker/buildx' }}
+    uses: docker/github-builder/.github/workflows/bake.yml@3415a188caae9a0da7fba83bc06985776e0b1790 # v1.14.0
     needs:
+      - bin-image-prepare
       - test-integration
       - test-unit
-    if: ${{ github.event_name != 'pull_request' && github.repository == 'docker/buildx' }}
-    steps:
-      -
-        name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-      -
-        name: Checkout
-        uses: actions/checkout@v5
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          version: ${{ env.SETUP_BUILDX_VERSION }}
-          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
-          buildkitd-flags: --debug
-      -
-        name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ env.REPO_SLUG }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-          bake-target: meta-helper
-      -
-        name: Login to DockerHub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
+    permissions:
+      contents: read # same as global permission
+      id-token: write # for signing attestation(s) with GitHub OIDC Token
+    with:
+      runner: amd64
+      target: image-cross
+      cache: true
+      cache-scope: bin-image
+      output: image
+      push: ${{ github.event_name != 'pull_request' }}
+      sbom: true
+      set-meta-labels: true
+      meta-images: |
+        ${{ needs.bin-image-prepare.outputs.repo-slug }}
+      meta-tags: |
+        type=ref,event=branch
+        type=ref,event=pr
+        type=semver,pattern={{version}}
+      meta-bake-target: meta-helper
+    secrets:
+      registry-auths: |
+        - registry: docker.io
           username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
           password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
-      -
-        name: Build and push image
-        uses: docker/bake-action@v6
-        with:
-          source: .
-          files: |
-            ./docker-bake.hcl
-            ${{ steps.meta.outputs.bake-file }}
-          targets: image-cross
-          push: ${{ github.event_name != 'pull_request' }}
-          sbom: true
-          set: |
-            *.cache-from=type=gha,scope=bin-image
-            *.cache-to=type=gha,scope=bin-image,mode=max
 
   scout:
     runs-on: ubuntu-24.04
@@ -483,21 +423,21 @@ jobs:
     steps:
       -
         name: Login to DockerHub
-        uses: docker/login-action@v3
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
           password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
       -
         name: Scout
         id: scout
-        uses: crazy-max/.github/.github/actions/docker-scout@ccae1c98f1237b5c19e4ef77ace44fa68b3bc7e4
+        uses: crazy-max/.github/.github/actions/docker-scout@46267a6e61cd56aac2fc79943df180152f4c89d6 # v1.10.1
         with:
           version: ${{ env.SCOUT_VERSION }}
           format: sarif
           image: registry://${{ env.REPO_SLUG }}:master
       -
         name: Upload SARIF report
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: ${{ steps.scout.outputs.result-file }}
 
@@ -509,33 +449,18 @@ jobs:
     needs:
       - test-integration
       - test-unit
-      - binaries
+      - binaries-finalize
     steps:
       -
-        name: Checkout
-        uses: actions/checkout@v5
-      -
-        name: Download binaries
-        uses: actions/download-artifact@v6
+        name: Download release binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: ${{ env.DESTDIR }}
-          pattern: buildx-*
-          merge-multiple: true
-      -
-        name: Create checksums
-        run: ./hack/hash-files
-      -
-        name: List artifacts
-        run: |
-          tree -nh ${{ env.DESTDIR }}
-      -
-        name: Check artifacts
-        run: |
-          find ${{ env.DESTDIR }} -type f -exec file -e ascii -- {} +
+          name: release
       -
         name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090  # v2.4.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

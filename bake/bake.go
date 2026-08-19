@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,20 +16,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	composecli "github.com/compose-spec/compose-go/v2/cli"
 	"github.com/docker/buildx/bake/hclparser"
 	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/util/buildflags"
+	"github.com/docker/buildx/util/osutil"
 	"github.com/docker/buildx/util/platformutil"
 	"github.com/docker/buildx/util/progress"
-	"github.com/docker/cli/cli/config"
+	"github.com/docker/buildx/util/urlutil"
 	dockeropts "github.com/docker/cli/opts"
 	hcl "github.com/hashicorp/hcl/v2"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
-	"github.com/moby/buildkit/session/auth/authprovider"
+	"github.com/moby/buildkit/frontend/dockerfile/dfgitutil"
 	"github.com/pkg/errors"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
@@ -42,6 +45,10 @@ var (
 type File struct {
 	Name string
 	Data []byte
+}
+
+type ParseOpt struct {
+	FileRelativePaths bool
 }
 
 type Override struct {
@@ -181,7 +188,7 @@ func readWithProgress(r io.Reader, setStatus func(st *client.VertexStatus)) (dt 
 }
 
 func ListTargets(files []File) ([]string, error) {
-	c, _, err := ParseFiles(files, nil)
+	c, _, err := ParseFiles(files, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -195,8 +202,8 @@ func ListTargets(files []File) ([]string, error) {
 	return dedupSlice(targets), nil
 }
 
-func ReadTargets(ctx context.Context, files []File, targets, overrides []string, defaults map[string]string, ent *EntitlementConf) (map[string]*Target, map[string]*Group, error) {
-	c, _, err := ParseFiles(files, defaults)
+func ReadTargets(ctx context.Context, files []File, targets, overrides []string, defaults, vars map[string]string, ent *EntitlementConf, opts ...ParseOpt) (map[string]*Target, map[string]*Group, error) {
+	c, _, err := ParseFiles(files, defaults, vars, opts...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -335,16 +342,18 @@ func (c Config) matchNames(pattern string) ([]string, error) {
 	return names, nil
 }
 
-func ParseFiles(files []File, defaults map[string]string) (_ *Config, _ *hclparser.ParseMeta, err error) {
+func ParseFiles(files []File, defaults, vars map[string]string, opts ...ParseOpt) (_ *Config, _ *hclparser.ParseMeta, err error) {
 	defer func() {
 		err = formatHCLError(err, files)
 	}()
+
+	frel := fileRelativePaths(opts)
 
 	var c Config
 	var composeFiles []File
 	var hclFiles []*hcl.File
 	for _, f := range files {
-		isCompose, composeErr := validateComposeFile(f.Data, f.Name)
+		isCompose, composeErr := validateComposeFile(f.Data, f.Name, vars)
 		if isCompose {
 			if composeErr != nil {
 				return nil, nil, composeErr
@@ -367,9 +376,12 @@ func ParseFiles(files []File, defaults map[string]string) (_ *Config, _ *hclpars
 	}
 
 	if len(composeFiles) > 0 {
-		cfg, cmperr := ParseComposeFiles(composeFiles)
+		cfg, cmperr := ParseComposeFiles(composeFiles, vars)
 		if cmperr != nil {
 			return nil, nil, errors.Wrap(cmperr, "failed to parse compose file")
+		}
+		if frel {
+			setComposeContextBase(cfg, composeFiles)
 		}
 		c = mergeConfig(c, *cfg)
 		c = dedupeConfig(c)
@@ -377,8 +389,17 @@ func ParseFiles(files []File, defaults map[string]string) (_ *Config, _ *hclpars
 
 	var pm hclparser.ParseMeta
 	if len(hclFiles) > 0 {
+		lookup := func(key string) (string, bool) {
+			if v, ok := vars[key]; ok {
+				return v, true
+			}
+			if envLookupAllowed() {
+				return os.LookupEnv(key)
+			}
+			return "", false
+		}
 		res, err := hclparser.Parse(hclparser.MergeFiles(hclFiles), hclparser.Opt{
-			LookupVar:     os.LookupEnv,
+			LookupVar:     lookup,
 			Vars:          defaults,
 			ValidateLabel: validateTargetName,
 		}, &c)
@@ -402,7 +423,76 @@ func ParseFiles(files []File, defaults map[string]string) (_ *Config, _ *hclpars
 		pm = *res
 	}
 
+	if frel {
+		rebaseContextPaths(&c)
+	}
+
 	return &c, &pm, nil
+}
+
+func fileRelativePaths(opts []ParseOpt) bool {
+	return slices.ContainsFunc(opts, func(opt ParseOpt) bool {
+		return opt.FileRelativePaths
+	})
+}
+
+func rebaseContextPaths(c *Config) {
+	targets := make(map[string]*Target, len(c.Targets))
+	for _, t := range c.Targets {
+		targets[t.Name] = t
+	}
+
+	for _, t := range c.Targets {
+		if ref := targets[t.contextBaseRef]; ref != nil {
+			switch {
+			case ref.hasContextBase:
+				t.contextBase = ref.contextBase
+				t.hasContextBase = true
+			case ref.hasDefaultContextBase:
+				t.contextBase = ref.defaultContextBase
+				t.hasContextBase = true
+			}
+		}
+		t.rebaseContextPaths()
+	}
+}
+
+func (t *Target) rebaseContextPaths() {
+	if t.Context != nil {
+		if t.hasContextBase {
+			contextPath := rebaseContextPath(t.contextBase, *t.Context)
+			t.Context = &contextPath
+		}
+	} else if t.hasDefaultContextBase {
+		t.useDefaultContextBase = true
+	}
+	for k, v := range t.Contexts {
+		if base, ok := t.contextsBase[k]; ok {
+			t.Contexts[k] = rebaseContextPath(base, v)
+		}
+	}
+}
+
+func localFileDir(name string) (string, bool) {
+	if name == "" || name == "-" || urlutil.IsRemoteURL(name) {
+		return "", false
+	}
+	return filepath.Dir(name), true
+}
+
+func rebaseContextPath(base, p string) string {
+	if base == "" || p == "" || isSpecialContextPath(p) || filepath.IsAbs(p) {
+		return p
+	}
+	return osutil.SanitizePath(filepath.Join(base, filepath.FromSlash(p)))
+}
+
+func isSpecialContextPath(p string) bool {
+	return strings.HasPrefix(p, "cwd://") ||
+		strings.HasPrefix(p, "target:") ||
+		strings.HasPrefix(p, "docker-image:") ||
+		strings.HasPrefix(p, "oci-layout://") ||
+		urlutil.IsRemoteURL(p)
 }
 
 func dedupeConfig(c Config) Config {
@@ -427,7 +517,7 @@ func dedupeConfig(c Config) Config {
 }
 
 func ParseFile(dt []byte, fn string) (*Config, error) {
-	c, _, err := ParseFiles([]File{{Data: dt, Name: fn}}, nil)
+	c, _, err := ParseFiles([]File{{Data: dt, Name: fn}}, nil, nil)
 	return c, err
 }
 
@@ -590,16 +680,24 @@ func (c Config) newOverrides(v []string) (map[string]map[string]Override, error)
 			// IMPORTANT: if you add more fields here, do not forget to update
 			// docs/reference/buildx_bake.md (--set) and https://docs.docker.com/build/bake/overrides/
 			switch keys[1] {
-			case "output", "cache-to", "cache-from", "tags", "platform", "secrets", "ssh", "attest", "entitlements", "network", "annotations":
+			case "output", "cache-to", "cache-from", "tags", "platform", "secrets", "ssh", "attest", "entitlements", "network", "annotations", "policy":
 				if len(parts) == 2 {
 					override.Append = appendTo
 					override.ArrValue = append(override.ArrValue, parts[1])
 				}
+			case "resources", "secret":
+				if len(keys) != 3 {
+					return nil, errors.Errorf("invalid key %s, %s requires name", parts[0], keys[1])
+				}
+				if appendTo {
+					return nil, errors.Errorf("invalid key %s, %s does not support append", parts[0], keys[1])
+				}
+				override.Value = parts[1]
 			case "args":
 				if len(keys) != 3 {
 					return nil, errors.Errorf("invalid key %s, args requires name", parts[0])
 				}
-				if len(parts) < 2 {
+				if len(parts) < 2 && envLookupAllowed() {
 					v, ok := os.LookupEnv(keys[2])
 					if !ok {
 						continue
@@ -674,6 +772,9 @@ func (c Config) ResolveTarget(name string, overrides map[string]map[string]Overr
 	t.Inherits = nil
 	if t.Context == nil {
 		s := "."
+		if t.useDefaultContextBase {
+			s = rebaseContextPath(t.defaultContextBase, ".")
+		}
 		t.Context = &s
 	}
 	if t.Dockerfile == nil || (t.Dockerfile != nil && *t.Dockerfile == "") {
@@ -734,35 +835,45 @@ type Target struct {
 	// Inherits is the only field that cannot be overridden with --set
 	Inherits []string `json:"inherits,omitempty" hcl:"inherits,optional" cty:"inherits"`
 
-	Annotations      []string                `json:"annotations,omitempty" hcl:"annotations,optional" cty:"annotations"`
-	Attest           buildflags.Attests      `json:"attest,omitempty" hcl:"attest,optional" cty:"attest"`
-	Context          *string                 `json:"context,omitempty" hcl:"context,optional" cty:"context"`
-	Contexts         map[string]string       `json:"contexts,omitempty" hcl:"contexts,optional" cty:"contexts"`
-	Dockerfile       *string                 `json:"dockerfile,omitempty" hcl:"dockerfile,optional" cty:"dockerfile"`
-	DockerfileInline *string                 `json:"dockerfile-inline,omitempty" hcl:"dockerfile-inline,optional" cty:"dockerfile-inline"`
-	Args             map[string]*string      `json:"args,omitempty" hcl:"args,optional" cty:"args"`
-	Labels           map[string]*string      `json:"labels,omitempty" hcl:"labels,optional" cty:"labels"`
-	Tags             []string                `json:"tags,omitempty" hcl:"tags,optional" cty:"tags"`
-	CacheFrom        buildflags.CacheOptions `json:"cache-from,omitempty" hcl:"cache-from,optional" cty:"cache-from"`
-	CacheTo          buildflags.CacheOptions `json:"cache-to,omitempty" hcl:"cache-to,optional" cty:"cache-to"`
-	Target           *string                 `json:"target,omitempty" hcl:"target,optional" cty:"target"`
-	Secrets          buildflags.Secrets      `json:"secret,omitempty" hcl:"secret,optional" cty:"secret"`
-	SSH              buildflags.SSHKeys      `json:"ssh,omitempty" hcl:"ssh,optional" cty:"ssh"`
-	Platforms        []string                `json:"platforms,omitempty" hcl:"platforms,optional" cty:"platforms"`
-	Outputs          buildflags.Exports      `json:"output,omitempty" hcl:"output,optional" cty:"output"`
-	Pull             *bool                   `json:"pull,omitempty" hcl:"pull,optional" cty:"pull"`
-	NoCache          *bool                   `json:"no-cache,omitempty" hcl:"no-cache,optional" cty:"no-cache"`
-	NetworkMode      *string                 `json:"network,omitempty" hcl:"network,optional" cty:"network"`
-	NoCacheFilter    []string                `json:"no-cache-filter,omitempty" hcl:"no-cache-filter,optional" cty:"no-cache-filter"`
-	ShmSize          *string                 `json:"shm-size,omitempty" hcl:"shm-size,optional" cty:"shm-size"`
-	Ulimits          []string                `json:"ulimits,omitempty" hcl:"ulimits,optional" cty:"ulimits"`
-	Call             *string                 `json:"call,omitempty" hcl:"call,optional" cty:"call"`
-	Entitlements     []string                `json:"entitlements,omitempty" hcl:"entitlements,optional" cty:"entitlements"`
-	ExtraHosts       map[string]*string      `json:"extra-hosts,omitempty" hcl:"extra-hosts,optional" cty:"extra-hosts"`
+	Annotations      []string                    `json:"annotations,omitempty" hcl:"annotations,optional" cty:"annotations"`
+	Attest           buildflags.Attests          `json:"attest,omitempty" hcl:"attest,optional" cty:"attest"`
+	Context          *string                     `json:"context,omitempty" hcl:"context,optional" cty:"context"`
+	Contexts         map[string]string           `json:"contexts,omitempty" hcl:"contexts,optional" cty:"contexts"`
+	Dockerfile       *string                     `json:"dockerfile,omitempty" hcl:"dockerfile,optional" cty:"dockerfile"`
+	DockerfileInline *string                     `json:"dockerfile-inline,omitempty" hcl:"dockerfile-inline,optional" cty:"dockerfile-inline"`
+	Args             map[string]*string          `json:"args,omitempty" hcl:"args,optional" cty:"args"`
+	Labels           map[string]*string          `json:"labels,omitempty" hcl:"labels,optional" cty:"labels"`
+	Tags             []string                    `json:"tags,omitempty" hcl:"tags,optional" cty:"tags"`
+	CacheFrom        buildflags.CacheOptions     `json:"cache-from,omitempty" hcl:"cache-from,optional" cty:"cache-from"`
+	CacheTo          buildflags.CacheOptions     `json:"cache-to,omitempty" hcl:"cache-to,optional" cty:"cache-to"`
+	Target           *string                     `json:"target,omitempty" hcl:"target,optional" cty:"target"`
+	Secrets          buildflags.Secrets          `json:"secret,omitempty" hcl:"secret,optional" cty:"secret"`
+	SSH              buildflags.SSHKeys          `json:"ssh,omitempty" hcl:"ssh,optional" cty:"ssh"`
+	Platforms        []string                    `json:"platforms,omitempty" hcl:"platforms,optional" cty:"platforms"`
+	Outputs          buildflags.Exports          `json:"output,omitempty" hcl:"output,optional" cty:"output"`
+	Pull             *bool                       `json:"pull,omitempty" hcl:"pull,optional" cty:"pull"`
+	NoCache          *bool                       `json:"no-cache,omitempty" hcl:"no-cache,optional" cty:"no-cache"`
+	NetworkMode      *string                     `json:"network,omitempty" hcl:"network,optional" cty:"network"`
+	NoCacheFilter    []string                    `json:"no-cache-filter,omitempty" hcl:"no-cache-filter,optional" cty:"no-cache-filter"`
+	ShmSize          *string                     `json:"shm-size,omitempty" hcl:"shm-size,optional" cty:"shm-size"`
+	Ulimits          []string                    `json:"ulimits,omitempty" hcl:"ulimits,optional" cty:"ulimits"`
+	Resources        *buildflags.ResourcesConfig `json:"resources,omitempty" hcl:"resources,optional" cty:"resources"`
+	Call             *string                     `json:"call,omitempty" hcl:"call,optional" cty:"call"`
+	Entitlements     []string                    `json:"entitlements,omitempty" hcl:"entitlements,optional" cty:"entitlements"`
+	ExtraHosts       map[string]*string          `json:"extra-hosts,omitempty" hcl:"extra-hosts,optional" cty:"extra-hosts"`
+	Policy           buildflags.PolicyConfigs    `json:"policy,omitempty" hcl:"policy,optional" cty:"policy"`
 	// IMPORTANT: if you add more fields here, do not forget to update newOverrides/AddOverrides and docs/bake-reference.md.
 
 	// linked is a private field to mark a target used as a linked one
 	linked bool
+
+	defaultContextBase    string
+	hasDefaultContextBase bool
+	useDefaultContextBase bool
+	contextBase           string
+	hasContextBase        bool
+	contextBaseRef        string
+	contextsBase          map[string]string
 }
 
 func (t *Target) MarshalJSON() ([]byte, error) {
@@ -811,9 +922,81 @@ func (t *Target) MarshalJSON() ([]byte, error) {
 var (
 	_ hclparser.WithEvalContexts = &Target{}
 	_ hclparser.WithGetName      = &Target{}
+	_ hclparser.WithBlockSource  = &Target{}
 	_ hclparser.WithEvalContexts = &Group{}
 	_ hclparser.WithGetName      = &Group{}
 )
+
+func (t *Target) SetBlockSource(block *hcl.Block) {
+	base, _ := localFileDir(block.DefRange.Filename)
+	t.defaultContextBase = base
+	t.hasDefaultContextBase = true
+
+	content, _, diags := block.Body.PartialContent(&hcl.BodySchema{
+		Attributes: []hcl.AttributeSchema{
+			{Name: "context"},
+			{Name: "contexts"},
+		},
+	})
+	if diags.HasErrors() {
+		return
+	}
+	if attr, ok := content.Attributes["context"]; ok {
+		t.contextBase = base
+		t.hasContextBase = true
+		t.contextBaseRef = targetContextRef(attr.Expr)
+	}
+	if _, ok := content.Attributes["contexts"]; ok {
+		t.setContextsBase(base)
+	}
+}
+
+func (t *Target) setContextsBase(base string) {
+	if len(t.Contexts) == 0 {
+		return
+	}
+	if t.contextsBase == nil {
+		t.contextsBase = map[string]string{}
+	}
+	for k := range t.Contexts {
+		t.contextsBase[k] = base
+	}
+}
+
+func targetContextRef(expr hcl.Expression) string {
+	traversal, diags := hcl.AbsTraversalForExpr(expr)
+	if diags.HasErrors() || len(traversal) != 3 {
+		return ""
+	}
+	root, ok := traversal[0].(hcl.TraverseRoot)
+	if !ok || root.Name != "target" {
+		return ""
+	}
+	target, ok := traversalStepName(traversal[1])
+	if !ok {
+		return ""
+	}
+	field, ok := traversal[2].(hcl.TraverseAttr)
+	if !ok || field.Name != "context" {
+		return ""
+	}
+	return target
+}
+
+func traversalStepName(step hcl.Traverser) (string, bool) {
+	switch step := step.(type) {
+	case hcl.TraverseAttr:
+		return step.Name, true
+	case hcl.TraverseIndex:
+		key, err := convert.Convert(step.Key, cty.String)
+		if err != nil || key.IsNull() || !key.IsKnown() {
+			return "", false
+		}
+		return key.AsString(), true
+	default:
+		return "", false
+	}
+}
 
 func (t *Target) normalize() {
 	t.Annotations = removeDupesStr(t.Annotations)
@@ -845,8 +1028,16 @@ func (t *Target) normalize() {
 }
 
 func (t *Target) Merge(t2 *Target) {
+	if t2.hasDefaultContextBase {
+		t.defaultContextBase = t2.defaultContextBase
+		t.hasDefaultContextBase = true
+		t.useDefaultContextBase = t2.useDefaultContextBase
+	}
 	if t2.Context != nil {
 		t.Context = t2.Context
+		t.contextBase = t2.contextBase
+		t.hasContextBase = t2.hasContextBase
+		t.contextBaseRef = t2.contextBaseRef
 	}
 	if t2.Dockerfile != nil {
 		t.Dockerfile = t2.Dockerfile
@@ -868,6 +1059,14 @@ func (t *Target) Merge(t2 *Target) {
 			t.Contexts = map[string]string{}
 		}
 		t.Contexts[k] = v
+		if t.contextsBase == nil {
+			t.contextsBase = map[string]string{}
+		}
+		if base, ok := t2.contextsBase[k]; ok {
+			t.contextsBase[k] = base
+		} else {
+			delete(t.contextsBase, k)
+		}
 	}
 	for k, v := range t2.Labels {
 		if v == nil {
@@ -892,6 +1091,9 @@ func (t *Target) Merge(t2 *Target) {
 	}
 	if t2.Attest != nil { // merge
 		t.Attest = t.Attest.Merge(t2.Attest)
+	}
+	if t2.Policy != nil { // merge
+		t.Policy = append(t.Policy, t2.Policy...)
 	}
 	if t2.Secrets != nil { // merge
 		t.Secrets = t.Secrets.Merge(t2.Secrets)
@@ -929,6 +1131,9 @@ func (t *Target) Merge(t2 *Target) {
 	if t2.Ulimits != nil { // merge
 		t.Ulimits = append(t.Ulimits, t2.Ulimits...)
 	}
+	if t2.Resources != nil { // merge
+		t.Resources = t.Resources.Merge(t2.Resources)
+	}
 	if t2.Description != "" {
 		t.Description = t2.Description
 	}
@@ -950,6 +1155,8 @@ func (t *Target) Merge(t2 *Target) {
 func (t *Target) AddOverrides(overrides map[string]Override, ent *EntitlementConf) error {
 	// IMPORTANT: if you add more fields here, do not forget to update
 	// docs/bake-reference.md and https://docs.docker.com/build/bake/overrides/
+	secretOverrides := map[string]Override{}
+	secretEntitlements := map[string]struct{}{}
 	for key, o := range overrides {
 		value := o.Value
 		keys := strings.SplitN(key, ".", 2)
@@ -987,6 +1194,17 @@ func (t *Target) AddOverrides(overrides map[string]Override, ent *EntitlementCon
 				t.Tags = append(t.Tags, o.ArrValue...)
 			} else {
 				t.Tags = o.ArrValue
+			}
+		case "policy":
+			if !o.Append {
+				t.Policy = nil
+			}
+			for _, v := range o.ArrValue {
+				cfg, err := buildflags.ParsePolicyConfig(v)
+				if err != nil {
+					return err
+				}
+				t.Policy = append(t.Policy, cfg)
 			}
 		case "cache-from":
 			cacheFrom, err := buildflags.ParseCacheEntry(o.ArrValue)
@@ -1026,20 +1244,23 @@ func (t *Target) AddOverrides(overrides map[string]Override, ent *EntitlementCon
 			t.Target = &value
 		case "call":
 			t.Call = &value
+		case "secret":
+			if len(keys) != 2 {
+				return errors.Errorf("invalid format for secret, expecting secret.<id>=<value>")
+			}
+			secretOverrides[keys[1]] = o
 		case "secrets":
 			secrets, err := parseArrValue[buildflags.Secret](o.ArrValue)
 			if err != nil {
 				return errors.Wrap(err, "invalid value for outputs")
 			}
+			for _, s := range secrets {
+				secretEntitlements[s.ID] = struct{}{}
+			}
 			if o.Append {
 				t.Secrets = t.Secrets.Merge(secrets)
 			} else {
 				t.Secrets = secrets
-			}
-			for _, s := range t.Secrets {
-				if s.FilePath != "" {
-					ent.FSRead = append(ent.FSRead, s.FilePath)
-				}
 			}
 		case "ssh":
 			ssh, err := parseArrValue[buildflags.SSH](o.ArrValue)
@@ -1112,6 +1333,16 @@ func (t *Target) AddOverrides(overrides map[string]Override, ent *EntitlementCon
 			} else {
 				t.Ulimits = o.ArrValue
 			}
+		case "resources":
+			if len(keys) != 2 {
+				return errors.Errorf("invalid format for resources, expecting resources.<name>=<value>")
+			}
+			if t.Resources == nil {
+				t.Resources = &buildflags.ResourcesConfig{}
+			}
+			if err := t.Resources.SetField(keys[1], value); err != nil {
+				return err
+			}
 		case "network":
 			t.NetworkMode = &value
 		case "pull":
@@ -1144,7 +1375,44 @@ func (t *Target) AddOverrides(overrides map[string]Override, ent *EntitlementCon
 			return errors.Errorf("unknown key: %s", keys[0])
 		}
 	}
+	for id, o := range secretOverrides {
+		if err := t.updateSecret(id, o.Value); err != nil {
+			return err
+		}
+		secretEntitlements[id] = struct{}{}
+	}
+	for _, s := range t.Secrets {
+		if _, ok := secretEntitlements[s.ID]; ok && s.FilePath != "" {
+			ent.FSRead = append(ent.FSRead, s.FilePath)
+		}
+	}
 	return nil
+}
+
+func (t *Target) updateSecret(id, value string) error {
+	if id == "" {
+		return errors.Errorf("invalid format for secret, expecting secret.<id>=<value>")
+	}
+
+	for _, s := range t.Secrets {
+		if s.ID != id {
+			continue
+		}
+
+		var next buildflags.Secret
+		if err := next.UnmarshalText([]byte(value)); err != nil {
+			return err
+		}
+		if next.ID != "" && next.ID != id {
+			return errors.Errorf("secret override id %q does not match declared secret %q", next.ID, id)
+		}
+
+		s.Env = next.Env
+		s.FilePath = next.FilePath
+		return nil
+	}
+
+	return errors.Errorf("secret %q must be declared before it can be overridden", id)
 }
 
 func (g *Group) GetEvalContexts(ectx *hcl.EvalContext, block *hcl.Block, loadDeps func(hcl.Expression) hcl.Diagnostics) ([]*hcl.EvalContext, error) {
@@ -1256,18 +1524,12 @@ func (t *Target) GetName(ectx *hcl.EvalContext, block *hcl.Block, loadDeps func(
 }
 
 func TargetsToBuildOpt(m map[string]*Target, inp *Input) (map[string]build.Options, error) {
-	// make sure local credentials are loaded multiple times for different targets
-	authProvider := authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
-		ConfigFile: config.LoadDefaultConfigFile(os.Stderr),
-	})
-
 	m2 := make(map[string]build.Options, len(m))
 	for k, v := range m {
 		bo, err := toBuildOpt(v, inp)
 		if err != nil {
 			return nil, err
 		}
-		bo.Session = append(bo.Session, authProvider)
 		m2[k] = *bo
 	}
 	return m2, nil
@@ -1281,15 +1543,18 @@ func updateContext(t *build.Inputs, inp *Input) {
 	for k, v := range t.NamedContexts {
 		if v.Path == "." {
 			t.NamedContexts[k] = build.NamedContext{Path: inp.URL}
+			continue
 		}
 		if strings.HasPrefix(v.Path, "cwd://") || strings.HasPrefix(v.Path, "target:") || strings.HasPrefix(v.Path, "docker-image:") {
 			continue
 		}
-		if build.IsRemoteURL(v.Path) {
+		if urlutil.IsRemoteURL(v.Path) {
 			continue
 		}
-		st := llb.Scratch().File(llb.Copy(*inp.State, v.Path, "/"), llb.WithCustomNamef("set context %s to %s", k, v.Path))
-		t.NamedContexts[k] = build.NamedContext{State: &st}
+		st := llb.Scratch().File(llb.Copy(*inp.State, v.Path, "/", &llb.CopyInfo{
+			CopyDirContentsOnly: true,
+		}), llb.WithCustomNamef("set context %s to %s", k, v.Path))
+		t.NamedContexts[k] = build.NamedContext{State: &st, Path: remoteURLWithSubdir(inp.URL, v.Path)}
 	}
 
 	if t.ContextPath == "." {
@@ -1299,7 +1564,7 @@ func updateContext(t *build.Inputs, inp *Input) {
 	if strings.HasPrefix(t.ContextPath, "cwd://") {
 		return
 	}
-	if build.IsRemoteURL(t.ContextPath) {
+	if urlutil.IsRemoteURL(t.ContextPath) {
 		return
 	}
 	st := llb.Scratch().File(
@@ -1309,16 +1574,44 @@ func updateContext(t *build.Inputs, inp *Input) {
 		llb.WithCustomNamef("set context to %s", t.ContextPath),
 	)
 	t.ContextState = &st
+	t.ContextPath = remoteURLWithSubdir(inp.URL, t.ContextPath)
 }
 
-func isRemoteContext(t build.Inputs, inp *Input) bool {
-	if build.IsRemoteURL(t.ContextPath) {
-		return true
+func remoteURLWithSubdir(remoteURL, subdir string) string {
+	subdir = path.Clean(subdir)
+	if subdir == "." || remoteURL == "" {
+		return remoteURL
 	}
-	if inp != nil && build.IsRemoteURL(inp.URL) && !strings.HasPrefix(t.ContextPath, "cwd://") {
-		return true
+
+	// only relevant for git urls
+	parsed, ok, err := dfgitutil.ParseGitRef(remoteURL)
+	if err != nil || !ok {
+		return remoteURL
 	}
-	return false
+	if parsed.SubDir != "" {
+		subdir = path.Clean(path.Join(parsed.SubDir, subdir))
+	}
+
+	// keep query string and transport style untouched nad only append/adjust
+	// fragment subdir
+	if !strings.Contains(remoteURL, "#") && subdir != "" {
+		if u, err := url.Parse(remoteURL); err == nil {
+			q := u.Query()
+			if q.Has("subdir") {
+				q.Set("subdir", subdir)
+				u.RawQuery = q.Encode()
+				return u.String()
+			}
+		}
+	}
+
+	// otherwise, we adjust the fragment part to add/replace subdir
+	base, frag, _ := strings.Cut(remoteURL, "#")
+	ref, _, _ := strings.Cut(frag, ":")
+	if ref == "" {
+		return base + "#:" + subdir
+	}
+	return base + "#" + ref + ":" + subdir
 }
 
 func collectLocalPaths(t build.Inputs) []string {
@@ -1345,7 +1638,7 @@ func collectLocalPaths(t build.Inputs) []string {
 }
 
 func isLocalPath(p string) (string, bool) {
-	if build.IsRemoteURL(p) || strings.HasPrefix(p, "target:") || strings.HasPrefix(p, "docker-image:") {
+	if urlutil.IsRemoteURL(p) || strings.HasPrefix(p, "target:") || strings.HasPrefix(p, "docker-image:") {
 		return "", false
 	}
 	return strings.TrimPrefix(p, "cwd://"), true
@@ -1363,7 +1656,7 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	if t.Context != nil {
 		contextPath = *t.Context
 	}
-	if !strings.HasPrefix(contextPath, "cwd://") && !build.IsRemoteURL(contextPath) {
+	if !strings.HasPrefix(contextPath, "cwd://") && !urlutil.IsRemoteURL(contextPath) {
 		contextPath = path.Clean(contextPath)
 	}
 	dockerfilePath := "Dockerfile"
@@ -1393,7 +1686,7 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 		if err != nil {
 			return nil, err
 		}
-	} else if !build.IsRemoteURL(bi.DockerfilePath) && strings.HasPrefix(bi.ContextPath, "cwd://") && (inp != nil && build.IsRemoteURL(inp.URL)) {
+	} else if !urlutil.IsRemoteURL(bi.DockerfilePath) && strings.HasPrefix(bi.ContextPath, "cwd://") && (inp != nil && urlutil.IsRemoteURL(inp.URL)) {
 		// We don't currently support reading a remote Dockerfile with a local
 		// context when doing a remote invocation because we automatically
 		// derive the dockerfile from the context atm:
@@ -1415,7 +1708,7 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	if v, ok := strings.CutPrefix(bi.ContextPath, "cwd://"); ok {
 		bi.ContextPath = path.Clean(v)
 	}
-	if !build.IsRemoteURL(bi.ContextPath) && bi.ContextState == nil && !filepath.IsAbs(bi.DockerfilePath) {
+	if !urlutil.IsRemoteURL(bi.ContextPath) && bi.ContextState == nil && !filepath.IsAbs(bi.DockerfilePath) {
 		bi.DockerfilePath = filepath.Join(bi.ContextPath, bi.DockerfilePath)
 	}
 	for k, v := range bi.NamedContexts {
@@ -1462,7 +1755,8 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	}
 
 	var extraHosts []string
-	for k, v := range t.ExtraHosts {
+	for _, k := range slices.Sorted(maps.Keys(t.ExtraHosts)) {
+		v := t.ExtraHosts[k]
 		if v == nil {
 			continue
 		}
@@ -1490,19 +1784,8 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 	bo.Platforms = platforms
 
 	secrets := t.Secrets
-	if isRemoteContext(bi, inp) {
-		if _, ok := os.LookupEnv("BUILDX_BAKE_GIT_AUTH_TOKEN"); ok {
-			secrets = append(secrets, &buildflags.Secret{
-				ID:  llb.GitAuthTokenKey,
-				Env: "BUILDX_BAKE_GIT_AUTH_TOKEN",
-			})
-		}
-		if _, ok := os.LookupEnv("BUILDX_BAKE_GIT_AUTH_HEADER"); ok {
-			secrets = append(secrets, &buildflags.Secret{
-				ID:  llb.GitAuthHeaderKey,
-				Env: "BUILDX_BAKE_GIT_AUTH_HEADER",
-			})
-		}
+	if inp != nil && shouldAttachGitAuthSecrets(inp.URL, bi.ContextPath) {
+		secrets = append(secrets, gitAuthSecretsFromEnv(inp.URL)...)
 	}
 	bo.SecretSpecs = secrets.Normalize()
 	secretAttachment, err := build.CreateSecrets(bo.SecretSpecs)
@@ -1556,6 +1839,8 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 
 	bo.Attests = t.Attest.ToMap()
 
+	bo.Policy = []buildflags.PolicyConfig(t.Policy)
+
 	bo.SourcePolicy, err = build.ReadSourcePolicy()
 	if err != nil {
 		return nil, err
@@ -1568,6 +1853,12 @@ func toBuildOpt(t *Target, inp *Input) (*build.Options, error) {
 		}
 	}
 	bo.Ulimits = ulimits
+
+	resourceLimits, err := build.ParseResourceLimits(t.Resources.ToEntries())
+	if err != nil {
+		return nil, err
+	}
+	bo.ResourceLimits = resourceLimits
 
 	bo.Allow = append(bo.Allow, t.Entitlements...)
 
@@ -1719,3 +2010,13 @@ func parseArrValue[T any, PT arrValue[T]](s []string) ([]*T, error) {
 	}
 	return outputs, nil
 }
+
+var envLookupAllowed = sync.OnceValue(func() bool {
+	if v, ok := os.LookupEnv("BUILDX_BAKE_DISABLE_VARS_ENV_LOOKUP"); ok {
+		disable, err := strconv.ParseBool(v)
+		if err == nil && disable {
+			return false
+		}
+	}
+	return true
+})

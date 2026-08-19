@@ -25,6 +25,7 @@ Build from a file
 | [`--load`](#load)                   | `bool`        |         | Shorthand for `--set=*.output=type=docker`. Conditional.                                                              |
 | [`--metadata-file`](#metadata-file) | `string`      |         | Write build result metadata to a file                                                                                 |
 | [`--no-cache`](#no-cache)           | `bool`        |         | Do not use cache when building the image                                                                              |
+| `--policy`                          | `stringArray` |         | Global policy evaluation options (format: `[disabled=true\|false][,strict=true\|false][,log-level=level]`)            |
 | [`--print`](#print)                 | `bool`        |         | Print the options without building                                                                                    |
 | [`--progress`](#progress)           | `string`      | `auto`  | Set type of progress output (`auto`, `none`,  `plain`, `quiet`, `rawjson`, `tty`). Use plain to show container output |
 | [`--provenance`](#provenance)       | `string`      |         | Shorthand for `--set=*.attest=type=provenance`                                                                        |
@@ -32,6 +33,7 @@ Build from a file
 | [`--push`](#push)                   | `bool`        |         | Shorthand for `--set=*.output=type=registry`. Conditional.                                                            |
 | [`--sbom`](#sbom)                   | `string`      |         | Shorthand for `--set=*.attest=type=sbom`                                                                              |
 | [`--set`](#set)                     | `stringArray` |         | Override target value (e.g., `targetpattern.key=value`)                                                               |
+| `--var`                             | `stringArray` |         | Set a variable value (e.g., `name=value`)                                                                             |
 
 
 <!---MARKER_GEN_END-->
@@ -82,6 +84,9 @@ Bake supports the following filesystem entitlements:
 The `fs` entitlements take a path value (relative or absolute) to a directory
 on the filesystem. Alternatively, you can pass a wildcard (`*`) to allow Bake
 to access the entire filesystem.
+
+Bake also supports `--allow=buildx.local.delete` to grant local outputs
+permission to delete stale files when `mode=delete` is set.
 
 ### Example: fs.read
 
@@ -148,6 +153,14 @@ This is mutually exclusive with `-f` / `--file`; if both are specified, the envi
 Multiple definitions can be specified by separating them with the system's path separator
 (typically `;` on Windows and `:` elsewhere), but can be changed with `BUILDX_BAKE_PATH_SEPARATOR`.
 
+By default, local directory build contexts in Bake files are resolved from the
+current working directory. To opt in to resolving local directory build contexts
+from the Bake file that defines each path, set
+`BUILDX_BAKE_FILE_RELATIVE_PATHS=1`. Compose files use the first Compose file
+directory as the base, which matches Compose project directory semantics. Use
+the `cwd://` prefix for paths that should remain relative to the current working
+directory.
+
 You can pass the names of the targets to build, to build only specific target(s).
 The following example builds the `db` and `webapp-release` targets that are
 defined in the `docker-bake.dev.hcl` file:
@@ -211,6 +224,24 @@ DEBUG         bool      false                Add debug symbols
 ```
 
 Variable types will be shown when set using the `type` property in the Bake file.
+
+The `--list=variables` option displays variables defined in the Bake file, including their descriptions and default values.
+
+### Example: listing variables with descriptions
+
+```hcl
+variable "GO_VERSION" {
+  default     = "1.22"
+  description = "Go version used for building the application"
+}
+```
+
+```console
+$ docker buildx bake --list=variables
+
+NAME          DESCRIPTION                                      DEFAULT
+GO_VERSION    Go version used for building the application     1.22
+```
 
 By default, the output of `docker buildx bake --list` is presented in a table
 format. Alternatively, you can use a long-form CSV syntax and specify a
@@ -408,6 +439,9 @@ $ docker buildx bake --set foo*.args.mybuildarg=value   # overrides build arg fo
 $ docker buildx bake --set *.platform=linux/arm64       # overrides platform for all targets
 $ docker buildx bake --set foo*.no-cache                # bypass caching only for targets starting with 'foo'
 $ docker buildx bake --set target.platform+=linux/arm64 # appends 'linux/arm64' to the platform list
+$ docker buildx bake --set target.contexts.bar=../bar   # overrides 'bar' named context
+$ docker buildx bake --set target.resources.memory=2g   # overrides memory resource limit
+$ docker buildx bake --set target.secret.aws=env=AWS    # overrides source for an existing secret
 ```
 
 > [!NOTE]
@@ -426,6 +460,7 @@ You can override the following fields:
 * `cache-to`
 * `call`
 * `context`
+* `contexts`
 * `dockerfile`
 * `entitlements`
 * `extra-hosts`
@@ -437,6 +472,8 @@ You can override the following fields:
 * `platform`
 * `pull`
 * `push`
+* `resources`
+* `secret.<id>`
 * `secrets`
 * `ssh`
 * `tags`
@@ -458,3 +495,39 @@ You can append using `+=` operator for the following fields:
 
 > [!NOTE]
 > ¹ These fields already append by default.
+
+#### Inline values for composable attributes
+
+Some fields, such as `ssh`, `secret`, `output`, `cache-to`, `cache-from`,
+`attest`, and `annotations`, are composable attributes that accept a list of
+object values in a Bake file. When you override these fields with `--set`, you
+provide each value using the same inline string syntax as the corresponding
+build flag, not the HCL object form. The `--set` override replaces or appends
+to the list as a whole; it doesn't address individual sub-fields with a
+sub-selector. Only the map-valued fields `args`, `contexts`, `labels`, and
+`extra-hosts` support targeting a specific entry with a sub-key (for example
+`--set target.args.MYARG=value`).
+
+For example, to set the SSH agent socket or key for a target, use the same
+`id=path` form accepted by [`build --ssh`](buildx_build.md#ssh):
+
+```console
+$ docker buildx bake --set "*.ssh=default=$HOME/.ssh/id_ed25519"
+```
+
+To expose multiple paths for the same `id`, separate them with commas in the
+second part:
+
+```console
+$ docker buildx bake --set "*.ssh=default=$HOME/.ssh/id_ed25519,$HOME/.ssh/id_rsa"
+```
+
+Your shell expands `$HOME` before buildx sees the value. The equivalent Bake
+file definition uses the
+[`homedir`](https://docs.docker.com/build/bake/stdlib/#homedir) HCL function:
+
+```hcl
+target "default" {
+  ssh = [{ id = "default", paths = ["${homedir()}/.ssh/id_ed25519", "${homedir()}/.ssh/id_rsa"] }]
+}
+```

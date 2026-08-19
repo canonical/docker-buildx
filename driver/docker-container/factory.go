@@ -8,7 +8,7 @@ import (
 
 	"github.com/docker/buildx/driver"
 	dockeropts "github.com/docker/cli/opts"
-	dockerclient "github.com/docker/docker/client"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/pkg/errors"
 )
 
@@ -114,6 +114,11 @@ func (f *factory) New(ctx context.Context, cfg driver.InitConfig) (driver.Driver
 			d.env = append(d.env, fmt.Sprintf("%s=%s", envName, v))
 		case k == "provenance-add-gha":
 			d.writeProvenanceGHA, err = strconv.ParseBool(v)
+			if err != nil {
+				return nil, err
+			}
+		case k == "allow-untrusted-image":
+			d.allowUntrustedImage, err = strconv.ParseBool(v)
 			if err != nil {
 				return nil, err
 			}

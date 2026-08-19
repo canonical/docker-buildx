@@ -14,8 +14,7 @@ BAKE_TARGETS := binaries binaries-cross lint lint-gopls validate-vendor validate
 all: binaries
 
 .PHONY: build
-build:
-	./hack/build
+build: binaries
 
 .PHONY: shell
 shell:
@@ -29,10 +28,6 @@ $(BAKE_TARGETS):
 install: binaries
 	mkdir -p ~/.docker/cli-plugins
 	install bin/build/buildx ~/.docker/cli-plugins/docker-buildx
-
-.PHONY: release
-release:
-	./hack/release
 
 .PHONY: validate-all
 validate-all: lint test validate-vendor validate-docs

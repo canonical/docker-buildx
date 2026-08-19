@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	iofs "io/fs"
-	"path/filepath"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -19,7 +19,6 @@ import (
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/tonistiigi/fsutil/types"
 )
 
 // NewResultHandle stores a gateway client, gateway reference, and the error from
@@ -81,38 +80,37 @@ func (r *ResultHandle) NewContainer(ctx context.Context, cfg *InvokeConfig) (gat
 	return r.gwClient.NewContainer(ctx, req)
 }
 
-func (r *ResultHandle) StatFile(ctx context.Context, fpath string, cfg *InvokeConfig) (*types.Stat, error) {
+func (r *ResultHandle) inferMountIndex(fpath string, cfg *InvokeConfig) (string, int, error) {
 	containerCfg, err := r.getContainerConfig(cfg)
 	if err != nil {
-		return nil, err
+		return "", 0, err
 	}
 
-	candidateMounts := make([]gateway.Mount, 0, len(containerCfg.Mounts))
-	for _, m := range containerCfg.Mounts {
+	type mountCandidate struct {
+		gateway.Mount
+		Index int
+	}
+
+	candidateMounts := make([]mountCandidate, 0, len(containerCfg.Mounts))
+	for i, m := range containerCfg.Mounts {
 		if strings.HasPrefix(fpath, m.Dest) {
-			candidateMounts = append(candidateMounts, m)
+			candidateMounts = append(candidateMounts, mountCandidate{
+				Mount: m,
+				Index: i,
+			})
 		}
 	}
 	if len(candidateMounts) == 0 {
-		return nil, iofs.ErrNotExist
+		return "", 0, iofs.ErrNotExist
 	}
 
-	slices.SortFunc(candidateMounts, func(a, b gateway.Mount) int {
+	slices.SortFunc(candidateMounts, func(a, b mountCandidate) int {
 		return cmp.Compare(len(a.Dest), len(b.Dest))
 	})
 
 	m := candidateMounts[len(candidateMounts)-1]
-	relpath, err := filepath.Rel(m.Dest, fpath)
-	if err != nil {
-		return nil, err
-	}
-
-	if m.Ref == nil {
-		return nil, iofs.ErrNotExist
-	}
-
-	req := gateway.StatRequest{Path: filepath.ToSlash(relpath)}
-	return m.Ref.StatFile(ctx, req)
+	relpath := strings.TrimPrefix(fpath, m.Dest)
+	return path.Join("/", relpath), m.Index, nil
 }
 
 func (r *ResultHandle) getContainerConfig(cfg *InvokeConfig) (containerCfg gateway.NewContainerRequest, _ error) {
@@ -222,16 +220,24 @@ func containerConfigFromError(solveErr *errdefs.SolveError, cfg *InvokeConfig) (
 	if err != nil {
 		return nil, err
 	}
+	// When a solve fails before its inputs/mounts have been resolved (for
+	// example, when computing the cache key for an exec op fails because an
+	// input source cannot be found), MountIDs/InputIDs may be empty or shorter
+	// than the declared mount list. Guard against that so callers (such as the
+	// debug adapter) get a clean error instead of an index-out-of-range panic.
+	ids := solveErr.MountIDs
+	if cfg.Initial {
+		ids = solveErr.InputIDs
+	}
+	if len(ids) < len(exec.Mounts) {
+		return nil, errors.Errorf("cannot start debug container: failing step has no mount results available (got %d of %d)", len(ids), len(exec.Mounts))
+	}
 	var mounts []gateway.Mount
 	for i, mnt := range exec.Mounts {
-		rid := solveErr.MountIDs[i]
-		if cfg.Initial {
-			rid = solveErr.InputIDs[i]
-		}
 		mounts = append(mounts, gateway.Mount{
 			Selector:  mnt.Selector,
 			Dest:      mnt.Dest,
-			ResultID:  rid,
+			ResultID:  ids[i],
 			Readonly:  mnt.Readonly,
 			MountType: mnt.MountType,
 			CacheOpt:  mnt.CacheOpt,

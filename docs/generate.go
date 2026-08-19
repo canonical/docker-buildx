@@ -135,9 +135,9 @@ func generateBakeStdlibDocs(filename string) error {
 	}
 	currentContent := string(dt)
 
-	start := strings.Index(currentContent, "<!---MARKER_STDLIB_START-->")
+	before, _, ok := strings.Cut(currentContent, "<!---MARKER_STDLIB_START-->")
 	end := strings.Index(currentContent, "<!---MARKER_STDLIB_END-->")
-	if start == -1 {
+	if !ok {
 		return errors.Errorf("no start marker in %s", filename)
 	}
 	if end == -1 {
@@ -152,7 +152,9 @@ func generateBakeStdlibDocs(filename string) error {
 	sort.Strings(names)
 	for _, name := range names {
 		fname := fmt.Sprintf("`%s`", name)
-		if strings.Contains(currentContent, "<a name=\""+name+"\"></a>") {
+		// Check if there's a heading for this function in the Examples section
+		// Headings are in the format: ### `functionname`
+		if strings.Contains(currentContent, "## `"+name+"`") {
 			fname = fmt.Sprintf("[`%s`](#%s)", name, name)
 		}
 		fdesc := hclparser.StdlibFuncDescription(name)
@@ -162,7 +164,7 @@ func generateBakeStdlibDocs(filename string) error {
 		table.AddRow(fname, fdesc)
 	}
 
-	newContent := currentContent[:start] + "<!---MARKER_STDLIB_START-->\n\n" + table.String() + "\n" + currentContent[end:]
+	newContent := before + "<!---MARKER_STDLIB_START-->\n\n" + table.String() + "\n" + currentContent[end:]
 	return os.WriteFile(filename, []byte(newContent), 0644)
 }
 
