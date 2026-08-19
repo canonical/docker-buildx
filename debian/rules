@@ -27,10 +27,7 @@ override_dh_gencontrol:
 	dh_gencontrol
 
 override_dh_auto_build:
-	make \
-		VERSION='$(VERSION)' \
-		REVISION='$(BUILDX_GITCOMMIT)' \
-		build
+	debian/old-upstream-hack-build.sh
 
 # Basic smoke test to ensure binary built successfully
 # (especially since its actual tests, even unit tests, are *really* involved.
