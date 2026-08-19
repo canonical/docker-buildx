@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"io"
 	"net"
 	"os"
@@ -9,13 +8,16 @@ import (
 	"github.com/containerd/console"
 	"github.com/docker/buildx/dap"
 	"github.com/docker/buildx/dap/common"
-	"github.com/docker/buildx/util/cobrautil"
 	"github.com/docker/buildx/util/ioset"
 	"github.com/docker/buildx/util/progress"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+)
+
+const (
+	dapEnvUserAgent = "BUILDX_DAP_USER_AGENT"
 )
 
 func dapCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
@@ -26,7 +28,6 @@ func dapCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 
 		DisableFlagsInUseLine: true,
 	}
-	cobrautil.MarkCommandExperimental(cmd)
 
 	dapBuildCmd := buildCmd(dockerCli, rootOpts, &options)
 	dapBuildCmd.Args = cobra.RangeArgs(0, 1)
@@ -51,6 +52,13 @@ func (d *dapOptions) New(in ioset.In) (debuggerInstance, error) {
 	}, nil
 }
 
+func (d *dapOptions) Info() debuggerInfo {
+	return debuggerInfo{
+		Name:      "dap",
+		UserAgent: os.Getenv(dapEnvUserAgent),
+	}
+}
+
 type LaunchConfig struct {
 	Dockerfile  string `json:"dockerfile,omitempty"`
 	ContextPath string `json:"contextPath,omitempty"`
@@ -64,7 +72,7 @@ type adapterProtocolDebugger struct {
 }
 
 func (d *adapterProtocolDebugger) Start(printer *progress.Printer, opts *BuildOptions) error {
-	cfg, err := d.Adapter.Start(context.Background(), d.conn)
+	cfg, err := d.Adapter.Start(d.conn)
 	if err != nil {
 		return errors.Wrap(err, "debug adapter did not start")
 	}
@@ -81,9 +89,9 @@ func (d *adapterProtocolDebugger) Start(printer *progress.Printer, opts *BuildOp
 	return nil
 }
 
-func (d *adapterProtocolDebugger) Stop() error {
+func (d *adapterProtocolDebugger) Stop(retErr error) error {
 	defer d.conn.Close()
-	return d.Adapter.Stop()
+	return d.Adapter.Stop(retErr)
 }
 
 func dapAttachCmd() *cobra.Command {
@@ -102,7 +110,8 @@ func dapAttachCmd() *cobra.Command {
 				return err
 			}
 
-			conn, err := net.Dial("unix", args[0])
+			dialer := net.Dialer{}
+			conn, err := dialer.DialContext(cmd.Context(), "unix", args[0])
 			if err != nil {
 				return err
 			}

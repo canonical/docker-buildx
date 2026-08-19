@@ -91,7 +91,7 @@ func TestFactory_processDriverOpts(t *testing.T) {
 
 			require.Equal(t, "test-ns", ns)
 			require.Equal(t, "test:latest", r.Image)
-			require.Equal(t, 2, r.Replicas)
+			require.Equal(t, int32(2), r.Replicas)
 			require.Equal(t, "100m", r.RequestsCPU)
 			require.Equal(t, "32Mi", r.RequestsMemory)
 			require.Equal(t, "200m", r.LimitsCPU)
@@ -119,7 +119,7 @@ func TestFactory_processDriverOpts(t *testing.T) {
 
 			require.Equal(t, "test", ns)
 			require.Equal(t, bkimage.DefaultImage, r.Image)
-			require.Equal(t, 1, r.Replicas)
+			require.Equal(t, int32(1), r.Replicas)
 			require.Equal(t, "", r.RequestsCPU)
 			require.Equal(t, "", r.RequestsMemory)
 			require.Equal(t, "", r.LimitsCPU)
@@ -150,7 +150,7 @@ func TestFactory_processDriverOpts(t *testing.T) {
 
 			require.Equal(t, "test", ns)
 			require.Equal(t, bkimage.DefaultRootlessImage, r.Image)
-			require.Equal(t, 1, r.Replicas)
+			require.Equal(t, int32(1), r.Replicas)
 			require.Equal(t, "", r.RequestsCPU)
 			require.Equal(t, "", r.RequestsMemory)
 			require.Equal(t, "", r.LimitsCPU)
@@ -267,4 +267,42 @@ func TestFactory_processDriverOpts(t *testing.T) {
 			require.Error(t, err)
 		},
 	)
+}
+
+func TestRequiresUncachedClient(t *testing.T) {
+	f := factory{
+		cc: &mockClientConfig{
+			clientConfig: &rest.Config{},
+		},
+	}
+	baseCfg := driver.InitConfig{
+		Name: driver.BuilderName("test"),
+	}
+
+	t.Run("RandomLoadbalance", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.DriverOpts = map[string]string{"loadbalance": "random"}
+		d, err := f.New(t.Context(), cfg)
+		require.NoError(t, err)
+		require.True(t, d.(*Driver).RequiresUncachedClient(),
+			"expected RequiresUncachedClient=true for loadbalance=random")
+	})
+
+	t.Run("StickyLoadbalance", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.DriverOpts = map[string]string{"loadbalance": "sticky"}
+		d, err := f.New(t.Context(), cfg)
+		require.NoError(t, err)
+		require.False(t, d.(*Driver).RequiresUncachedClient(),
+			"expected RequiresUncachedClient=false for loadbalance=sticky")
+	})
+
+	t.Run("DefaultLoadbalance", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.DriverOpts = map[string]string{}
+		d, err := f.New(t.Context(), cfg)
+		require.NoError(t, err)
+		require.False(t, d.(*Driver).RequiresUncachedClient(),
+			"expected RequiresUncachedClient=false for default (sticky) loadbalance")
+	})
 }

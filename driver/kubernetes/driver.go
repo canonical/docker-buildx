@@ -2,13 +2,16 @@ package kubernetes
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/docker/buildx/driver"
 	"github.com/docker/buildx/driver/kubernetes/execconn"
+	"github.com/docker/buildx/driver/kubernetes/kubeclient"
 	"github.com/docker/buildx/driver/kubernetes/manifest"
 	"github.com/docker/buildx/driver/kubernetes/podchooser"
 	"github.com/docker/buildx/store"
@@ -17,13 +20,11 @@ import (
 	"github.com/docker/go-units"
 	"github.com/moby/buildkit/client"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	clientappsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
-	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 const (
@@ -43,20 +44,26 @@ type Driver struct {
 
 	// if you add fields, remember to update docs:
 	// https://github.com/docker/docs/blob/main/content/build/drivers/kubernetes.md
-	minReplicas      int
-	deployment       *appsv1.Deployment
-	configMaps       []*corev1.ConfigMap
-	clientset        *kubernetes.Clientset
-	deploymentClient clientappsv1.DeploymentInterface
-	podClient        clientcorev1.PodInterface
-	configMapClient  clientcorev1.ConfigMapInterface
-	podChooser       podchooser.PodChooser
-	defaultLoad      bool
-	timeout          time.Duration
+	minReplicas       int
+	loadbalance       string
+	deployment        *appsv1.Deployment
+	statefulSet       *appsv1.StatefulSet
+	configMaps        []*corev1.ConfigMap
+	deploymentClient  kubeclient.DeploymentClient
+	statefulSetClient kubeclient.StatefulSetClient
+	podClient         kubeclient.PodClient
+	configMapClient   kubeclient.ConfigMapClient
+	podChooser        podchooser.PodChooser
+	defaultLoad       bool
+	timeout           time.Duration
 }
 
 func (d *Driver) IsMobyDriver() bool {
 	return false
+}
+
+func (d *Driver) RequiresUncachedClient() bool {
+	return d.loadbalance == LoadbalanceRandom
 }
 
 func (d *Driver) Config() driver.InitConfig {
@@ -65,31 +72,18 @@ func (d *Driver) Config() driver.InitConfig {
 
 func (d *Driver) Bootstrap(ctx context.Context, l progress.Logger) error {
 	return progress.Wrap("[internal] booting buildkit", l, func(sub progress.SubLogger) error {
-		_, err := d.deploymentClient.Get(ctx, d.deployment.Name, metav1.GetOptions{})
-		if err != nil {
-			if !apierrors.IsNotFound(err) {
-				return errors.Wrapf(err, "error for bootstrap %q", d.deployment.Name)
-			}
-
-			for _, cfg := range d.configMaps {
-				// create ConfigMap first if exists
-				_, err = d.configMapClient.Create(ctx, cfg, metav1.CreateOptions{})
-				if err != nil {
-					if !apierrors.IsAlreadyExists(err) {
-						return errors.Wrapf(err, "error while calling configMapClient.Create for %q", cfg.Name)
-					}
-					_, err = d.configMapClient.Update(ctx, cfg, metav1.UpdateOptions{})
-					if err != nil {
-						return errors.Wrapf(err, "error while calling configMapClient.Update for %q", cfg.Name)
-					}
-				}
-			}
-
-			_, err = d.deploymentClient.Create(ctx, d.deployment, metav1.CreateOptions{})
-			if err != nil {
-				return errors.Wrapf(err, "error while calling deploymentClient.Create for %q", d.deployment.Name)
+		if d.deployment != nil {
+			if err := bootstrap(ctx, d, d.deploymentClient, d.deployment.Name, d.deployment); err != nil {
+				return err
 			}
 		}
+
+		if d.statefulSet != nil {
+			if err := bootstrap(ctx, d, d.statefulSetClient, d.statefulSet.Name, d.statefulSet); err != nil {
+				return err
+			}
+		}
+
 		return sub.Wrap(
 			fmt.Sprintf("waiting for %d pods to be ready, timeout: %s", d.minReplicas, units.HumanDuration(d.timeout)),
 			func() error {
@@ -98,11 +92,76 @@ func (d *Driver) Bootstrap(ctx context.Context, l progress.Logger) error {
 	})
 }
 
+type appClient[S any] interface {
+	Get(ctx context.Context, name string, opts metav1.GetOptions) (*S, error)
+	Create(ctx context.Context, spec *S, opts metav1.CreateOptions) (*S, error)
+	Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error
+}
+
+func bootstrap[S any](ctx context.Context, d *Driver, client appClient[S], name string, spec *S) error {
+	if _, err := client.Get(ctx, name, metav1.GetOptions{}); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return errors.Wrapf(err, "error for bootstrap %q", name)
+		}
+
+		for _, cfg := range d.configMaps {
+			// create ConfigMap first if exists
+			if _, err = d.configMapClient.Create(ctx, cfg, metav1.CreateOptions{}); err != nil {
+				if !apierrors.IsAlreadyExists(err) {
+					return errors.Wrapf(err, "error while calling configMapClient.Create for %q", cfg.Name)
+				}
+
+				if _, err = d.configMapClient.Update(ctx, cfg, metav1.UpdateOptions{}); err != nil {
+					return errors.Wrapf(err, "error while calling configMapClient.Update for %q", cfg.Name)
+				}
+			}
+		}
+
+		if _, err = client.Create(ctx, spec, metav1.CreateOptions{}); err != nil {
+			return errors.Wrapf(err, "error while calling Create for %q", name)
+		}
+	}
+	return nil
+}
+
 func (d *Driver) wait(ctx context.Context) error {
+	if d.deployment != nil {
+		if err := d.waitDeployments(ctx); err != nil {
+			return err
+		}
+	}
+
+	if d.statefulSet != nil {
+		if err := d.waitStatefulSets(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Driver) waitDeployments(ctx context.Context) error {
+	return wait(ctx, d, d.deploymentClient, d.deployment.Name, func(s *appsv1.Deployment) error {
+		if s.Status.ReadyReplicas < int32(d.minReplicas) {
+			return errors.Errorf("expected %d replicas to be ready, got %d", d.minReplicas, s.Status.ReadyReplicas)
+		}
+		return nil
+	})
+}
+
+func (d *Driver) waitStatefulSets(ctx context.Context) error {
+	return wait(ctx, d, d.statefulSetClient, d.statefulSet.Name, func(s *appsv1.StatefulSet) error {
+		if s.Status.ReadyReplicas < int32(d.minReplicas) {
+			return errors.Errorf("expected %d replicas to be ready, got %d", d.minReplicas, s.Status.ReadyReplicas)
+		}
+		return nil
+	})
+}
+
+func wait[S any](ctx context.Context, d *Driver, client appClient[S], name string, check func(*S) error) error {
 	// TODO: use watch API
 	var (
 		err  error
-		depl *appsv1.Deployment
+		spec *S
 	)
 
 	timeoutChan := time.After(d.timeout)
@@ -116,31 +175,50 @@ func (d *Driver) wait(ctx context.Context) error {
 		case <-timeoutChan:
 			return err
 		case <-ticker.C:
-			depl, err = d.deploymentClient.Get(ctx, d.deployment.Name, metav1.GetOptions{})
+			spec, err = client.Get(ctx, name, metav1.GetOptions{})
 			if err == nil {
-				if depl.Status.ReadyReplicas >= int32(d.minReplicas) {
+				if err = check(spec); err == nil {
 					return nil
 				}
-				err = errors.Errorf("expected %d replicas to be ready, got %d", d.minReplicas, depl.Status.ReadyReplicas)
 			}
 		}
 	}
 }
 
-func (d *Driver) Info(ctx context.Context) (*driver.Info, error) {
-	depl, err := d.deploymentClient.Get(ctx, d.deployment.Name, metav1.GetOptions{})
-	if err != nil {
-		// TODO: return err if err != ErrNotFound
-		return &driver.Info{
-			Status: driver.Inactive,
-		}, nil
+func (d *Driver) Info(ctx context.Context) (_ *driver.Info, err error) {
+	var depl *appsv1.Deployment
+	if d.deployment != nil {
+		depl, err = d.deploymentClient.Get(ctx, d.deployment.Name, metav1.GetOptions{})
+		if err != nil {
+			// TODO: return err if err != ErrNotFound
+			return &driver.Info{
+				Status: driver.Inactive,
+			}, nil
+		}
+		if depl.Status.ReadyReplicas <= 0 {
+			return &driver.Info{
+				Status: driver.Stopped,
+			}, nil
+		}
 	}
-	if depl.Status.ReadyReplicas <= 0 {
-		return &driver.Info{
-			Status: driver.Stopped,
-		}, nil
+
+	var stat *appsv1.StatefulSet
+	if d.statefulSet != nil {
+		stat, err = d.statefulSetClient.Get(ctx, d.statefulSet.Name, metav1.GetOptions{})
+		if err != nil {
+			// TODO: return err if err != ErrNotFound
+			return &driver.Info{
+				Status: driver.Inactive,
+			}, nil
+		}
+		if stat.Status.ReadyReplicas <= 0 {
+			return &driver.Info{
+				Status: driver.Stopped,
+			}, nil
+		}
 	}
-	pods, err := podchooser.ListRunningPods(ctx, d.podClient, depl)
+
+	pods, err := podchooser.ListRunningPods(ctx, d.podClient, depl, stat)
 	if err != nil {
 		return nil, err
 	}
@@ -182,11 +260,22 @@ func (d *Driver) Rm(ctx context.Context, force, rmVolume, rmDaemon bool) error {
 		return nil
 	}
 
-	if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{}); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return errors.Wrapf(err, "error while calling deploymentClient.Delete for %q", d.deployment.Name)
+	if d.deployment != nil {
+		if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{}); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return errors.Wrapf(err, "error while calling deploymentClient.Delete for %q", d.deployment.Name)
+			}
 		}
 	}
+
+	if d.statefulSet != nil {
+		if err := d.statefulSetClient.Delete(ctx, d.statefulSet.Name, metav1.DeleteOptions{}); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return errors.Wrapf(err, "error while calling statefulSetClient.Delete for %q", d.statefulSet.Name)
+			}
+		}
+	}
+
 	for _, cfg := range d.configMaps {
 		if err := d.configMapClient.Delete(ctx, cfg.Name, metav1.DeleteOptions{}); err != nil {
 			if !apierrors.IsNotFound(err) {
@@ -198,7 +287,6 @@ func (d *Driver) Rm(ctx context.Context, force, rmVolume, rmDaemon bool) error {
 }
 
 func (d *Driver) Dial(ctx context.Context) (net.Conn, error) {
-	restClient := d.clientset.CoreV1().RESTClient()
 	restClientConfig, err := d.clientConfig.ClientConfig()
 	if err != nil {
 		return nil, err
@@ -212,11 +300,98 @@ func (d *Driver) Dial(ctx context.Context) (net.Conn, error) {
 	}
 	containerName := pod.Spec.Containers[0].Name
 	cmd := []string{"buildctl", "dial-stdio"}
-	conn, err := execconn.ExecConn(ctx, restClient, restClientConfig, pod.Namespace, pod.Name, containerName, cmd)
-	if err != nil {
-		return nil, err
+
+	// Retry connection with exponential backoff for transient errors
+	// See https://github.com/docker/buildx/issues/2668
+	var conn net.Conn
+	err = tryWithBackoff(ctx, pod.Name, func() error {
+		var err error
+		conn, err = execconn.ExecConn(ctx, d.podClient.RESTClient(), restClientConfig, pod.Namespace, pod.Name, containerName, cmd)
+		return err
+	})
+	return conn, err
+}
+
+// tryWithBackoff retries a function with exponential backoff for transient errors.
+// This handles the race condition where Kubernetes marks nodes as "Ready" before their
+// Certificate Signing Requests (CSRs) are approved, causing transient TLS errors.
+func tryWithBackoff(ctx context.Context, podName string, fn func() error) error {
+	const (
+		maxRetries = 5
+		baseDelay  = 500 * time.Millisecond
+		maxDelay   = 10 * time.Second
+	)
+
+	var lastErr error
+	for attempt := range maxRetries {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		if !isTransientConnectionError(err) {
+			return err
+		}
+
+		if attempt < maxRetries-1 {
+			delay := calculateBackoff(attempt, baseDelay, maxDelay)
+			logrus.Warnf("Transient connection error to pod %s (attempt %d/%d): %v. Retrying in %v...",
+				podName, attempt+1, maxRetries, err, delay)
+
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-time.After(delay):
+			}
+		}
 	}
-	return conn, nil
+
+	return errors.Wrapf(lastErr, "failed to connect to pod %s after %d attempts", podName, maxRetries)
+}
+
+// isTransientConnectionError checks if an error is transient and should be retried.
+func isTransientConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for context deadline exceeded
+	if stderrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Check for closed network connection
+	if stderrors.Is(err, net.ErrClosed) {
+		return true
+	}
+
+	// Check for timeout errors using net.Error interface
+	var netErr net.Error
+	if stderrors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	// Check for syscall errors (connection refused, connection reset)
+	var syscallErr syscall.Errno
+	if stderrors.As(err, &syscallErr) {
+		if syscallErr == syscall.ECONNREFUSED || syscallErr == syscall.ECONNRESET {
+			return true
+		}
+	}
+
+	// TLS internal errors don't have a specific type, so we still need to check the message
+	if strings.Contains(err.Error(), "tls: internal error") {
+		return true
+	}
+
+	return false
+}
+
+// calculateBackoff calculates the delay for the given attempt with exponential backoff.
+func calculateBackoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
+	return min(time.Duration(1<<uint(attempt))*baseDelay, maxDelay)
 }
 
 func (d *Driver) Client(ctx context.Context, opts ...client.ClientOpt) (*client.Client, error) {

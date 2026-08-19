@@ -2,9 +2,10 @@ package dap
 
 import (
 	"context"
-	"path"
+	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/docker/buildx/build"
@@ -12,10 +13,12 @@ import (
 	"github.com/google/go-dap"
 	"github.com/moby/buildkit/client/llb"
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
+	gwpb "github.com/moby/buildkit/frontend/gateway/pb"
 	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
+	"github.com/tonistiigi/fsutil/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -29,10 +32,10 @@ type thread struct {
 	variables *variableReferences
 
 	// Inputs to the evaluate call.
-	c          gateway.Client
-	ref        gateway.Reference
-	meta       map[string][]byte
-	sourcePath string
+	c             gateway.Client
+	ref           gateway.Reference
+	meta          map[string][]byte
+	sourceInfoMap func(*pb.Source) *pb.Source
 
 	// LLB state for the evaluate call.
 	def    *llb.Definition
@@ -69,18 +72,20 @@ func (t *thread) Evaluate(ctx Context, c gateway.Client, headRef gateway.Referen
 	}
 	defer t.reset()
 
+	var next *step
 	action := stepContinue
 	if cfg.StopOnEntry {
-		action = stepNext
+		// If we are stopping on entry, automatically advance to the
+		// entrypoint.
+		action, next = stepNext, t.entrypoint
 	}
 
 	var (
 		k    string
 		refs map[string]gateway.Reference
-		next = t.entrypoint
 		err  error
 	)
-	for next != nil {
+	for {
 		event := t.needsDebug(next, action, err)
 		if event.Reason != "" {
 			select {
@@ -96,7 +101,9 @@ func (t *thread) Evaluate(ctx Context, c gateway.Client, headRef gateway.Referen
 		}
 
 		t.setBreakpoints(ctx)
-		k, next, refs, err = t.seekNext(ctx, next, action)
+		if k, next, refs, err = t.seekNext(ctx, next, action); next == nil {
+			break
+		}
 	}
 	return nil
 }
@@ -105,14 +112,21 @@ func (t *thread) init(ctx Context, c gateway.Client, ref gateway.Reference, meta
 	t.c = c
 	t.ref = ref
 	t.meta = meta
+	t.sourceInfoMap = func(s *pb.Source) *pb.Source {
+		s = s.CloneVT()
+		for _, sinfo := range s.Infos {
+			// Map the filename from the source info from the frontend location to the
+			// client location.
+			fname := strings.Replace(sinfo.Filename, inputs.DockerfileMappingDst, inputs.DockerfileMappingSrc, 1)
 
-	// Combine the dockerfile directory with the context path to find the
-	// real base path. The frontend will report the base path as the filename.
-	dir := path.Dir(inputs.DockerfilePath)
-	if !path.IsAbs(dir) {
-		dir = path.Join(inputs.ContextPath, dir)
+			// Convert to an absolute path.
+			if abspath, err := filepath.Abs(fname); err == nil {
+				fname = abspath
+			}
+			sinfo.Filename = fname
+		}
+		return s
 	}
-	t.sourcePath = dir
 
 	if err := t.getLLBState(ctx); err != nil {
 		return err
@@ -124,6 +138,11 @@ type step struct {
 	// dgst holds the digest associated with this step. This is used for
 	// breakpoint resolution.
 	dgst digest.Digest
+
+	// deferred holds the inputs that should have its evaluation deferred.
+	// These inputs are still included in the references but will only be
+	// evaluated when needed.
+	deferred map[int]bool
 
 	// in holds the next target when step in is used.
 	in *step
@@ -171,6 +190,12 @@ func (t *thread) createBranch(dgst digest.Digest, exitpoint *step) (entrypoint *
 		parent: -1,
 	}
 
+	// The entrypoint doesn't have a source entry. Just skip this
+	// branch.
+	if entrypoint.frame.Source == nil {
+		return nil
+	}
+
 	// Create a pseudo-frame and attach it to the return point.
 	// This is mostly used for getting the correct inputs utilized
 	// by this frame.
@@ -214,11 +239,29 @@ func (t *thread) createBranch(dgst digest.Digest, exitpoint *step) (entrypoint *
 			inp := op.Inputs[i]
 
 			head := *entrypoint
-			entrypoint.dgst = ""
 
 			// Create the routine associated with this input.
 			// Associate it with the entrypoint in step.
 			head.in = t.createBranch(digest.Digest(inp.Digest), entrypoint)
+
+			// If this branch is empty (signified by a nil return value) then
+			// skip it.
+			if head.in == nil {
+				// Always mark this input as deferred since it doesn't have
+				// an associated branch.
+				if entrypoint.deferred == nil {
+					entrypoint.deferred = make(map[int]bool)
+				}
+				entrypoint.deferred[i] = true
+				continue
+			}
+			entrypoint.dgst = ""
+
+			// Filter this input from the target so it doesn't get solved
+			// when moving to this step.
+			head.deferred = make(map[int]bool)
+			maps.Copy(head.deferred, entrypoint.deferred)
+			head.deferred[i] = true
 			entrypoint = &head
 		}
 
@@ -230,11 +273,12 @@ func (t *thread) createBranch(dgst digest.Digest, exitpoint *step) (entrypoint *
 
 		// Create a new step that refers to the direct parent.
 		head := &step{
-			dgst:   digest.Digest(op.Inputs[entrypoint.parent].Digest),
-			in:     entrypoint,
-			next:   entrypoint,
-			out:    entrypoint.out,
-			parent: -1,
+			dgst:     digest.Digest(op.Inputs[entrypoint.parent].Digest),
+			deferred: entrypoint.deferred,
+			in:       entrypoint,
+			next:     entrypoint,
+			out:      entrypoint.out,
+			parent:   -1,
 		}
 		head.frame = t.getStackFrame(head.dgst, entrypoint)
 		entrypoint = head
@@ -250,7 +294,7 @@ func (t *thread) getStackFrame(dgst digest.Digest, next *step) *frame {
 		f.setNameFromMeta(meta)
 	}
 	if loc, ok := t.def.Source.Locations[string(dgst)]; ok {
-		f.fillLocation(t.def, loc, t.sourcePath, next)
+		f.fillLocation(t.def, loc, next)
 	}
 	t.frames[int32(f.Id)] = f
 	return f
@@ -294,7 +338,6 @@ func (t *thread) reset() {
 	t.c = nil
 	t.ref = nil
 	t.meta = nil
-	t.sourcePath = ""
 	t.ops = nil
 }
 
@@ -323,15 +366,11 @@ func (t *thread) pause(c Context, k string, refs map[string]gateway.Reference, e
 	}
 	t.paused = make(chan stepType, 1)
 
+	t.prepareResultHandle(c, k, refs, err)
+
 	ctx, cancel := context.WithCancelCause(c)
 	t.collectStackTrace(ctx, pos, refs)
 	t.cancel = cancel
-
-	// Used for exec. Only works if there was an error or if the step returns
-	// a root mount.
-	if ref, ok := refs[k]; ok || err != nil {
-		t.prepareResultHandle(c, ref, err)
-	}
 
 	event.ThreadId = t.id
 	c.C() <- &dap.StoppedEvent{
@@ -341,7 +380,15 @@ func (t *thread) pause(c Context, k string, refs map[string]gateway.Reference, e
 	return t.paused
 }
 
-func (t *thread) prepareResultHandle(c Context, ref gateway.Reference, err error) {
+func (t *thread) prepareResultHandle(c Context, k string, refs map[string]gateway.Reference, err error) {
+	var ref gateway.Reference
+	if err == nil {
+		var ok bool
+		if ref, ok = refs[k]; !ok {
+			return
+		}
+	}
+
 	// Create a context for cancellations and make the cancel function
 	// block on the wait group.
 	var wg sync.WaitGroup
@@ -353,13 +400,36 @@ func (t *thread) prepareResultHandle(c Context, ref gateway.Reference, err error
 
 	t.rCtx = build.NewResultHandle(ctx, t.c, ref, t.meta, err)
 
+	if err != nil {
+		gwcaps := t.c.BuildOpts().Caps
+
+		var solveErr *errdefs.SolveError
+		// If we had a solve error and the exec filesystem capability, we can
+		// get the filesystem mounts used in the actual build rather than only the input
+		// mounts.
+		if gwcaps.Supports(gwpb.CapGatewayExecFilesystem) == nil && errors.As(err, &solveErr) {
+			if exec, ok := solveErr.Op.Op.(*pb.Op_Exec); ok {
+				rCtx := t.rCtx
+
+				getContainer := sync.OnceValues(func() (*build.Container, error) {
+					return build.NewContainer(c, rCtx, &build.InvokeConfig{})
+				})
+
+				for i, m := range exec.Exec.Mounts {
+					refs[m.Dest] = &mountReference{
+						getContainer: getContainer,
+						index:        i,
+					}
+				}
+			}
+		}
+	}
+
 	// Start the attach. Use the context we created and perform it in
 	// a goroutine. We aren't necessarily assuming this will actually work.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		t.sh.Attach(ctx, t)
-	}()
+	})
 }
 
 func (t *thread) Continue() {
@@ -433,9 +503,12 @@ func (t *thread) getLLBState(ctx Context) error {
 		return err
 	}
 
+	if t.sourceInfoMap != nil {
+		t.def.Source = t.sourceInfoMap(t.def.Source)
+	}
+
 	for _, src := range t.def.Source.Infos {
-		fname := filepath.Join(t.sourcePath, src.Filename)
-		t.sourceMap.Put(ctx, fname, src.Data)
+		t.sourceMap.Put(ctx, src.Filename, src.Data)
 	}
 
 	t.ops = make(map[digest.Digest]*pb.Op, len(t.def.Def))
@@ -454,23 +527,28 @@ func (t *thread) getLLBState(ctx Context) error {
 }
 
 func (t *thread) setBreakpoints(ctx Context) {
-	t.bps = t.breakpointMap.Intersect(ctx, t.def.Source, t.sourcePath)
+	t.bps = t.breakpointMap.Intersect(ctx, t.def.Source)
 }
 
 func (t *thread) seekNext(ctx Context, from *step, action stepType) (string, *step, map[string]gateway.Reference, error) {
-	// If we're at the end, return no digest to signal that
-	// we should conclude debugging.
-	var target *step
+	// Determine how we are going to limit the scan for the next step.
+	var limit func(s *step) *step
 	switch action {
 	case stepNext:
-		target = t.continueDigest(from, from.next)
+		limit = func(s *step) *step {
+			return s.next
+		}
 	case stepIn:
-		target = from.in
+		limit = func(s *step) *step {
+			return s.in
+		}
 	case stepOut:
-		target = t.continueDigest(from, from.out)
-	case stepContinue:
-		target = t.continueDigest(from, nil)
+		limit = func(s *step) *step {
+			return s.out
+		}
 	}
+
+	target := t.continueDigest(from, limit)
 	return t.seek(ctx, target)
 }
 
@@ -496,8 +574,10 @@ func (t *thread) seek(ctx Context, target *step) (k string, result *step, mounts
 	return k, result, refs, nil
 }
 
-func (t *thread) continueDigest(from, until *step) *step {
-	if len(t.bps) == 0 && until == nil {
+func (t *thread) continueDigest(from *step, limit func(*step) *step) *step {
+	// First chance to exit early. If there's no function for limiting
+	// the until step and no breakpoints then just go directly to the end step.
+	if len(t.bps) == 0 && limit == nil {
 		return nil
 	}
 
@@ -508,6 +588,27 @@ func (t *thread) continueDigest(from, until *step) *step {
 
 		_, ok := t.bps[dgst]
 		return ok
+	}
+
+	// Special case. When we aren't coming from any step we consider
+	// whether the entrypoint itself is a breakpoint. If it is, we stop
+	// there. Otherwise, we treat the entrypoint as the from location.
+	if from == nil {
+		if isBreakpoint(t.entrypoint.dgst) {
+			return t.entrypoint
+		}
+		from = t.entrypoint
+	}
+
+	var until *step
+	if limit != nil {
+		until = limit(from)
+	}
+
+	// Second chance to exit early. If we've fully resolved from and the
+	// limit function doesn't return an end step, just go directly to the end.
+	if len(t.bps) == 0 && until == nil {
+		return nil
 	}
 
 	next := func(s *step) *step {
@@ -532,7 +633,7 @@ func (t *thread) solveInputs(ctx context.Context, target *step) (string, map[str
 	var root string
 	refs := make(map[string]gateway.Reference)
 	for i, input := range op.Inputs {
-		k := t.determineInputName(op, input)
+		k := t.determineInputName(op, i, input)
 		if _, ok := refs[k]; ok || k == "" {
 			continue
 		}
@@ -545,20 +646,37 @@ func (t *thread) solveInputs(ctx context.Context, target *step) (string, map[str
 		if err != nil {
 			return "", nil, err
 		}
+
+		// If we have marked this input to be deferred, wrap it in a reference
+		// that suppresses the evaluate call.
+		if target.deferred[i] {
+			ref = &deferredReference{Reference: ref}
+		}
 		refs[k] = ref
 	}
 	return root, refs, nil
 }
 
-func (t *thread) determineInputName(op *pb.Op, input *pb.Input) string {
-	switch op := op.Op.(type) {
-	case *pb.Op_Exec:
-		for _, m := range op.Exec.Mounts {
-			if m.Input >= 0 && m.Input == input.Index {
+func (t *thread) determineInputName(op *pb.Op, index int, input *pb.Input) string {
+	// Attempt to match the input to one of the mount destinations if we have
+	// an exec operation.
+	if exec, ok := op.Op.(*pb.Op_Exec); ok {
+		for _, m := range exec.Exec.Mounts {
+			if m.Input >= 0 && m.Input == int64(index) {
 				return m.Dest
 			}
 		}
 	}
+
+	// Is our input digest a source? Use the identifier if it is.
+	// That should give us something that is at least more user-friendly.
+	if op := t.ops[digest.Digest(input.Digest)]; op != nil && input.Index == 0 {
+		if source, ok := op.Op.(*pb.Op_Source); ok {
+			return source.Source.Identifier
+		}
+	}
+
+	// Use a default name that matches the input digest.
 	return input.Digest
 }
 
@@ -679,4 +797,61 @@ func (t *thread) rewind(ctx Context, inErr error) (k string, result *step, mount
 		return k, result, mounts, retErr
 	}
 	return k, result, mounts, inErr
+}
+
+type mountReference struct {
+	getContainer func() (*build.Container, error)
+	index        int
+}
+
+func (r *mountReference) ToState() (llb.State, error) {
+	return llb.State{}, errors.New("unimplemented, cannot use ToState with mount reference")
+}
+
+func (r *mountReference) Evaluate(ctx context.Context) error {
+	return nil
+}
+
+func (r *mountReference) ReadFile(ctx context.Context, req gateway.ReadRequest) ([]byte, error) {
+	ctr, err := r.getContainer()
+	if err != nil {
+		return nil, err
+	}
+
+	return ctr.ReadFile(ctx, gateway.ReadContainerRequest{
+		ReadRequest: req,
+		MountIndex:  r.index,
+	})
+}
+
+func (r *mountReference) StatFile(ctx context.Context, req gateway.StatRequest) (*types.Stat, error) {
+	ctr, err := r.getContainer()
+	if err != nil {
+		return nil, err
+	}
+
+	return ctr.StatFile(ctx, gateway.StatContainerRequest{
+		StatRequest: req,
+		MountIndex:  r.index,
+	})
+}
+
+func (r *mountReference) ReadDir(ctx context.Context, req gateway.ReadDirRequest) ([]*types.Stat, error) {
+	ctr, err := r.getContainer()
+	if err != nil {
+		return nil, err
+	}
+
+	return ctr.ReadDir(ctx, gateway.ReadDirContainerRequest{
+		ReadDirRequest: req,
+		MountIndex:     r.index,
+	})
+}
+
+type deferredReference struct {
+	gateway.Reference
+}
+
+func (r *deferredReference) Evaluate(ctx context.Context) error {
+	return nil
 }

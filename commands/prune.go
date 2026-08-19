@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,12 +16,12 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/go-units"
 	"github.com/moby/buildkit/client"
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	pb "github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/apicaps"
+	dclient "github.com/moby/moby/client"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -34,6 +36,7 @@ type pruneOptions struct {
 	minFreeSpace  opts.MemBytes
 	force         bool
 	verbose       bool
+	timeout       time.Duration
 }
 
 const (
@@ -42,9 +45,7 @@ const (
 )
 
 func runPrune(ctx context.Context, dockerCli command.Cli, opts pruneOptions) error {
-	pruneFilters := opts.filter.Value()
-	pruneFilters = command.PruneFilters(dockerCli, pruneFilters)
-
+	pruneFilters := command.PruneFilters(dockerCli, opts.filter.Value())
 	pi, err := toBuildkitPruneInfo(pruneFilters)
 	if err != nil {
 		return err
@@ -68,7 +69,13 @@ func runPrune(ctx context.Context, dockerCli command.Cli, opts pruneOptions) err
 		return err
 	}
 
-	nodes, err := b.LoadNodes(ctx)
+	timeoutCtx, cancel := context.WithCancelCause(ctx)
+	if opts.timeout > 0 {
+		timeoutCtx, _ = context.WithTimeoutCause(timeoutCtx, opts.timeout, errors.WithStack(context.DeadlineExceeded)) //nolint:govet // no need to manually cancel this context as we already rely on parent
+	}
+	defer func() { cancel(errors.WithStack(context.Canceled)) }()
+
+	nodes, err := b.LoadNodes(timeoutCtx)
 	if err != nil {
 		return err
 	}
@@ -182,6 +189,7 @@ func pruneCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	flags.Var(&options.maxUsedSpace, "max-used-space", "Maximum amount of disk space allowed to keep for cache")
 	flags.BoolVar(&options.verbose, "verbose", false, "Provide a more verbose output")
 	flags.BoolVarP(&options.force, "force", "f", false, "Do not prompt for confirmation")
+	setBuilderStatusTimeoutFlag(flags, &options.timeout)
 
 	flags.Var(&options.reservedSpace, "keep-storage", "Amount of disk space to keep for cache")
 	flags.MarkDeprecated("keep-storage", "keep-storage flag has been changed to reserved-space")
@@ -189,20 +197,22 @@ func pruneCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	return cmd
 }
 
-func toBuildkitPruneInfo(f filters.Args) (*client.PruneInfo, error) {
-	var until time.Duration
-	untilValues := f.Get("until")          // canonical
-	unusedForValues := f.Get("unused-for") // deprecated synonym for "until" filter
+// getFilter returns the list of values associated with the key
+func getFilter(f dclient.Filters, key string) []string {
+	return slices.Collect(maps.Keys(f[key]))
+}
 
-	if len(untilValues) > 0 && len(unusedForValues) > 0 {
-		return nil, errors.Errorf("conflicting filters %q and %q", "until", "unused-for")
+func toBuildkitPruneInfo(pruneFilters dclient.Filters) (*client.PruneInfo, error) {
+	var until time.Duration
+	if len(pruneFilters["until"]) > 0 && len(pruneFilters["unused-for"]) > 0 {
+		return nil, errors.New(`conflicting filters "until" and "unused-for"`)
 	}
 	untilKey := "until"
-	if len(unusedForValues) > 0 {
-		untilKey = "unused-for"
+	if len(pruneFilters["unused-for"]) > 0 {
+		untilKey = "unused-for" // deprecated synonym for "until" filter
 	}
-	untilValues = append(untilValues, unusedForValues...)
 
+	untilValues := getFilter(pruneFilters, untilKey)
 	switch len(untilValues) {
 	case 0:
 		// nothing to do
@@ -213,16 +223,16 @@ func toBuildkitPruneInfo(f filters.Args) (*client.PruneInfo, error) {
 			return nil, errors.Wrapf(err, "%q filter expects a duration (e.g., '24h')", untilKey)
 		}
 	default:
-		return nil, errors.Errorf("filters expect only one value")
+		return nil, errors.Errorf("%q filter expects only one value", untilKey)
 	}
 
-	filters := make([]string, 0, f.Len())
-	for _, filterKey := range f.Keys() {
+	filters := make([]string, 0, len(pruneFilters))
+	for filterKey := range pruneFilters {
 		if filterKey == untilKey {
 			continue
 		}
 
-		values := f.Get(filterKey)
+		values := getFilter(pruneFilters, filterKey)
 		switch len(values) {
 		case 0:
 			filters = append(filters, filterKey)
@@ -235,7 +245,7 @@ func toBuildkitPruneInfo(f filters.Args) (*client.PruneInfo, error) {
 				filters = append(filters, filterKey+"=="+values[0])
 			}
 		default:
-			return nil, errors.Errorf("filters expect only one value")
+			return nil, errors.Errorf("%q filter expects only one value", filterKey)
 		}
 	}
 	return &client.PruneInfo{

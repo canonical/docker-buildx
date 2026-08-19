@@ -18,6 +18,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/distribution/reference"
+	noderesolver "github.com/docker/buildx/build/resolver"
 	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/driver"
 	"github.com/docker/buildx/util/buildflags"
@@ -29,8 +30,6 @@ import (
 	"github.com/docker/buildx/util/resolver"
 	"github.com/docker/buildx/util/waitmap"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
@@ -43,6 +42,8 @@ import (
 	spb "github.com/moby/buildkit/sourcepolicy/pb"
 	"github.com/moby/buildkit/util/progress/progresswriter"
 	"github.com/moby/buildkit/util/tracing"
+	"github.com/moby/moby/api/types/jsonstream"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -86,6 +87,7 @@ type Options struct {
 	Tags                       []string
 	Target                     string
 	Ulimits                    *opts.UlimitOpt
+	ResourceLimits             ResourceLimits
 
 	Session                []session.Attachable
 	Linked                 bool // Linked marks this target as exclusively linked (not requested by the user).
@@ -94,6 +96,19 @@ type Options struct {
 	SourcePolicy           *spb.Policy
 	GroupRef               string
 	Annotations            map[exptypes.AnnotationKey]string // Not used during build, annotations are already set in Exports. Just used to check for support with drivers.
+	Policy                 []buildflags.PolicyConfig
+}
+
+// ResourceLimits holds the cgroup resource constraints applied to individual
+// build steps (RUN instructions). They don't affect the build cache key.
+type ResourceLimits struct {
+	Memory     opts.MemBytes
+	MemorySwap opts.MemSwapBytes
+	CPUShares  int64
+	CPUPeriod  int64
+	CPUQuota   int64
+	CPUSetCPUs string
+	CPUSetMems string
 }
 
 type CallFunc struct {
@@ -112,6 +127,101 @@ type Inputs struct {
 	// DockerfileMappingSrc and DockerfileMappingDst are filled in by the builder.
 	DockerfileMappingSrc string
 	DockerfileMappingDst string
+
+	policy *policyOpt
+}
+
+type policyFileSpec struct {
+	Filename string
+	Optional bool
+	Data     []byte
+}
+
+type policyEvalOpt struct {
+	Strict   bool
+	LogLevel *logrus.Level
+	SkipCaps bool
+}
+
+type policyOpt struct {
+	Files        []policyFileSpec
+	ContextDir   string
+	ContextState *llb.State
+	policyEvalOpt
+}
+
+func withPolicyConfig(defaultPolicy policyOpt, configs []buildflags.PolicyConfig) ([]policyOpt, error) {
+	if len(configs) == 0 {
+		if len(defaultPolicy.Files) == 0 {
+			return nil, nil
+		}
+		return []policyOpt{defaultPolicy}, nil
+	}
+
+	for _, cfg := range configs {
+		if !cfg.Disabled {
+			continue
+		}
+		if cfg.Reset || cfg.Strict != nil || cfg.LogLevel != nil || len(cfg.Files) > 0 {
+			return nil, errors.New("disabled policy cannot be combined with other policy flags")
+		}
+		if len(configs) > 1 {
+			return nil, errors.New("disabled policy cannot be combined with other policy flags")
+		}
+		return nil, nil
+	}
+
+	out := make([]policyOpt, 0, len(configs)+1)
+	if len(defaultPolicy.Files) != 0 {
+		out = append(out, defaultPolicy)
+	}
+
+	var last buildflags.PolicyConfig
+
+	for _, cfg := range configs {
+		if cfg.Reset {
+			out = nil
+		}
+
+		if len(cfg.Files) == 0 {
+			if len(out) == 0 {
+				last = cfg
+			} else {
+				last := &out[len(out)-1]
+				if cfg.Strict != nil {
+					last.Strict = *cfg.Strict
+				}
+				if cfg.LogLevel != nil {
+					last.LogLevel = cfg.LogLevel
+				}
+			}
+			continue
+		}
+
+		opt := policyOpt{
+			Files: make([]policyFileSpec, 0, len(cfg.Files)),
+		}
+		for _, f := range cfg.Files {
+			opt.Files = append(opt.Files, policyFileSpec{Filename: f.Filename})
+		}
+		if last.Strict != nil {
+			opt.Strict = *last.Strict
+		}
+		if last.LogLevel != nil {
+			opt.LogLevel = last.LogLevel
+		}
+		if cfg.Strict != nil {
+			opt.Strict = *cfg.Strict
+		}
+		if cfg.LogLevel != nil {
+			opt.LogLevel = cfg.LogLevel
+		}
+		opt.ContextDir = defaultPolicy.ContextDir
+		opt.ContextState = defaultPolicy.ContextState
+		out = append(out, opt)
+	}
+
+	return out, nil
 }
 
 type NamedContext struct {
@@ -120,7 +230,7 @@ type NamedContext struct {
 }
 
 type reqForNode struct {
-	*resolvedNode
+	*noderesolver.ResolvedNode
 	so *client.SolveOpt
 }
 
@@ -189,18 +299,18 @@ func warnOnNoOutput(ctx context.Context, nodes []builder.Node, opts map[string]O
 	logrus.Warnf("%s. Build result will only remain in the build cache. To push result image into registry use --push or to load image into docker use --load", warnNoOutputBuf.String())
 }
 
-func newBuildRequests(ctx context.Context, docker *dockerutil.Client, cfg *confutil.Config, drivers map[string][]*resolvedNode, w progress.Writer, opts map[string]Options) (_ map[string][]*reqForNode, _ func(), retErr error) {
+func newBuildRequests(ctx context.Context, docker *dockerutil.Client, cfg *confutil.Config, drivers map[string][]*noderesolver.ResolvedNode, w progress.Writer, opts map[string]Options) (_ map[string][]*reqForNode, _ func(error), retErr error) {
 	reqForNodes := make(map[string][]*reqForNode)
 
-	var releasers []func()
-	releaseAll := func() {
+	var releasers []func(error)
+	releaseAll := func(inErr error) {
 		for _, fn := range releasers {
-			fn()
+			fn(inErr)
 		}
 	}
 	defer func() {
 		if retErr != nil {
-			releaseAll()
+			releaseAll(retErr)
 		}
 	}()
 
@@ -219,13 +329,13 @@ func newBuildRequests(ctx context.Context, docker *dockerutil.Client, cfg *confu
 			if np.Node().Driver.IsMobyDriver() {
 				hasMobyDriver = true
 			}
-			opt.Platforms = np.platforms
+			opt.Platforms = np.Platforms()
 			gatewayOpts, err := np.BuildOpts(ctx)
 			if err != nil {
 				return nil, nil, err
 			}
 			localOpt := opt
-			so, release, err := toSolveOpt(ctx, np.Node(), multiDriver, &localOpt, gatewayOpts, cfg, w, docker)
+			so, release, err := toSolveOpt(ctx, np, multiDriver, &localOpt, gatewayOpts, cfg, w, docker)
 			opts[k] = localOpt
 			if err != nil {
 				return nil, nil, err
@@ -236,7 +346,7 @@ func newBuildRequests(ctx context.Context, docker *dockerutil.Client, cfg *confu
 			}
 			addGitAttrs(so)
 			reqn = append(reqn, &reqForNode{
-				resolvedNode: np,
+				ResolvedNode: np,
 				so:           so,
 			})
 		}
@@ -267,7 +377,7 @@ func newBuildRequests(ctx context.Context, docker *dockerutil.Client, cfg *confu
 	return reqForNodes, releaseAll, nil
 }
 
-func validateTargetLinks(reqForNodes map[string][]*reqForNode, drivers map[string][]*resolvedNode, opts map[string]Options) error {
+func validateTargetLinks(reqForNodes map[string][]*reqForNode, drivers map[string][]*noderesolver.ResolvedNode, opts map[string]Options) error {
 	for name := range opts {
 		dps := reqForNodes[name]
 		for i, dp := range dps {
@@ -282,7 +392,7 @@ func validateTargetLinks(reqForNodes map[string][]*reqForNode, drivers map[strin
 
 					var found bool
 					for _, dp2 := range dps2 {
-						if dp2.driverIndex == dp.driverIndex {
+						if dp2.Key() == dp.Key() {
 							found = true
 							break
 						}
@@ -335,7 +445,11 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 	}
 	warnOnNoOutput(ctx, nodes, opts)
 
-	drivers, err := resolveDrivers(ctx, nodes, opts, w)
+	optPlatforms := make(map[string][]ocispecs.Platform, len(opts))
+	for k, opt := range opts {
+		optPlatforms[k] = opt.Platforms
+	}
+	drivers, err := noderesolver.ResolveAll(ctx, nodes, optPlatforms, w)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +459,9 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer func() {
+		release(err)
+	}()
 
 	// validate that all links between targets use same drivers
 	if err := validateTargetLinks(reqForNodes, drivers, opts); err != nil {
@@ -390,7 +506,6 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 			var insecurePush bool
 
 			for i, dp := range dps {
-				i, dp := i, dp
 				node := dp.Node()
 				so := reqForNodes[k][i].so
 				if multiDriver {
@@ -459,7 +574,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 
 					pw = progress.ResetTime(pw)
 
-					if err := waitContextDeps(ctx, dp.driverIndex, results, so); err != nil {
+					if err := waitContextDeps(ctx, dp, results, so); err != nil {
 						return err
 					}
 
@@ -510,7 +625,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 							callRes = res.Metadata
 						}
 
-						rKey := resultKey(dp.driverIndex, k)
+						rKey := resultKey(dp, k)
 						results.Set(rKey, res)
 
 						forceEval := false
@@ -529,7 +644,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 								return nil, err
 							}
 						} else if forceEval {
-							if err := res.EachRef(func(ref gateway.Reference) error {
+							if err := eachRefParallel(ctx, res, func(ctx context.Context, ref gateway.Reference) error {
 								return ref.Evaluate(ctx)
 							}); err != nil {
 								return nil, err
@@ -704,11 +819,10 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 
 							itpull := imagetools.New(imageopt)
 
-							ref, err := reference.ParseNormalizedNamed(names[0])
+							ref, err := imagetools.ParseLocation(names[0])
 							if err != nil {
 								return err
 							}
-							ref = reference.TagNameOnly(ref)
 
 							srcs := make([]*imagetools.Source, len(descs))
 							for i, desc := range descs {
@@ -731,7 +845,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 							itpush := imagetools.New(imageopt)
 
 							for _, n := range names {
-								nn, err := reference.ParseNormalizedNamed(n)
+								nn, err := imagetools.ParseLocation(n)
 								if err != nil {
 									return err
 								}
@@ -802,7 +916,7 @@ func pushWithMoby(ctx context.Context, d *driver.DriverHandle, name string, l pr
 		return err
 	}
 
-	rc, err := api.ImagePush(ctx, name, image.PushOptions{
+	rc, err := api.ImagePush(ctx, name, dockerclient.ImagePushOptions{
 		RegistryAuth: creds,
 	})
 	if err != nil {
@@ -824,7 +938,7 @@ func pushWithMoby(ctx context.Context, d *driver.DriverHandle, name string, l pr
 	dec := json.NewDecoder(rc)
 	var parsedError error
 	for {
-		var jm jsonmessage.JSONMessage
+		var jm jsonstream.Message
 		if err := dec.Decode(&jm); err != nil {
 			if parsedError != nil {
 				return parsedError
@@ -888,15 +1002,17 @@ func remoteDigestWithMoby(ctx context.Context, d *driver.DriverHandle, name stri
 	if len(img.RepoDigests) == 0 {
 		return "", nil
 	}
-	remoteImage, err := api.DistributionInspect(ctx, name, creds)
+	remoteImage, err := api.DistributionInspect(ctx, name, dockerclient.DistributionInspectOptions{
+		EncodedRegistryAuth: creds,
+	})
 	if err != nil {
 		return "", err
 	}
 	return remoteImage.Descriptor.Digest.String(), nil
 }
 
-func resultKey(index int, name string) string {
-	return fmt.Sprintf("%d-%s", index, name)
+func resultKey(node *noderesolver.ResolvedNode, name string) string {
+	return fmt.Sprintf("%s-%s", node.Key(), name)
 }
 
 // detectSharedMounts looks for same local mounts used by multiple requests to the same node
@@ -914,13 +1030,17 @@ func detectSharedMounts(ctx context.Context, reqs map[string][]*reqForNode) (_ m
 	m := map[string]map[fsKey]*fsTracker{}
 	for _, reqs := range reqs {
 		for _, req := range reqs {
-			nodeName := req.resolvedNode.Node().Name
+			nodeName := req.Node().Name
+			// skip shared-session optimisation: targets may connect to different replicas.
+			if req.Node().Driver != nil && req.Node().Driver.RequiresUncachedClient() {
+				continue
+			}
 			if _, ok := m[nodeName]; !ok {
 				m[nodeName] = map[fsKey]*fsTracker{}
 			}
 			fsMap := m[nodeName]
 			for name, m := range req.so.LocalMounts {
-				fs, ok := m.(*fs)
+				fs, ok := m.(*fsMount)
 				if !ok {
 					continue
 				}
@@ -1026,8 +1146,8 @@ func calculateChildTargets(reqs map[string][]*reqForNode, opt map[string]Options
 			so := reqs[name][i].so
 			for k, v := range so.FrontendAttrs {
 				if strings.HasPrefix(k, "context:") && strings.HasPrefix(v, "target:") {
-					target := resultKey(dp.driverIndex, strings.TrimPrefix(v, "target:"))
-					out[target] = append(out[target], resultKey(dp.driverIndex, name))
+					target := resultKey(dp.ResolvedNode, strings.TrimPrefix(v, "target:"))
+					out[target] = append(out[target], resultKey(dp.ResolvedNode, name))
 				}
 			}
 		}
@@ -1035,11 +1155,11 @@ func calculateChildTargets(reqs map[string][]*reqForNode, opt map[string]Options
 	return out
 }
 
-func waitContextDeps(ctx context.Context, index int, results *waitmap.Map, so *client.SolveOpt) error {
+func waitContextDeps(ctx context.Context, node *noderesolver.ResolvedNode, results *waitmap.Map, so *client.SolveOpt) error {
 	m := map[string][]string{}
 	for k, v := range so.FrontendAttrs {
 		if strings.HasPrefix(k, "context:") && strings.HasPrefix(v, "target:") {
-			target := resultKey(index, strings.TrimPrefix(v, "target:"))
+			target := resultKey(node, strings.TrimPrefix(v, "target:"))
 			m[target] = append(m[target], k)
 		}
 	}
@@ -1216,6 +1336,24 @@ func solve(ctx context.Context, c gateway.Client, req gateway.SolveRequest) (*ga
 		}
 	}
 	return res, nil
+}
+
+func eachRefParallel(ctx context.Context, res *gateway.Result, fn func(context.Context, gateway.Reference) error) error {
+	var refs []gateway.Reference
+	if err := res.EachRef(func(ref gateway.Reference) error {
+		refs = append(refs, ref)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	eg, ctx := errgroup.WithContext(ctx)
+	for _, ref := range refs {
+		eg.Go(func() error {
+			return fn(ctx, ref)
+		})
+	}
+	return eg.Wait()
 }
 
 func catchFrontendError(retErr, frontendErr *error) {

@@ -24,7 +24,7 @@ func WithAccessToken(token string) GitServeOpt {
 	}
 }
 
-func GitServeHTTP(c *gitutil.Git, t testing.TB, opts ...GitServeOpt) (url string) {
+func GitServeHTTP(c *gitutil.GitCLI, t testing.TB, opts ...GitServeOpt) (url string) {
 	t.Helper()
 	gitUpdateServerInfo(c, t)
 	ctx, cancel := context.WithCancelCause(context.TODO())
@@ -38,7 +38,7 @@ func GitServeHTTP(c *gitutil.Git, t testing.TB, opts ...GitServeOpt) (url string
 	done := make(chan struct{})
 
 	name := "test.git"
-	dir, err := c.GitDir()
+	dir, err := c.GitDir(context.TODO())
 	if err != nil {
 		cancel(err)
 	}
@@ -66,7 +66,8 @@ func GitServeHTTP(c *gitutil.Git, t testing.TB, opts ...GitServeOpt) (url string
 		}
 
 		mux.Handle(prefix, handler(http.StripPrefix(prefix, http.FileServer(http.Dir(dir)))))
-		l, err := net.Listen("tcp", "localhost:0")
+		lc := net.ListenConfig{}
+		l, err := lc.Listen(ctx, "tcp", "localhost:0")
 		if err != nil {
 			panic(err)
 		}
@@ -92,7 +93,7 @@ func GitServeHTTP(c *gitutil.Git, t testing.TB, opts ...GitServeOpt) (url string
 	return fmt.Sprintf("http://%s/%s", addr, name)
 }
 
-func gitUpdateServerInfo(c *gitutil.Git, tb testing.TB) {
+func gitUpdateServerInfo(c *gitutil.GitCLI, tb testing.TB) {
 	tb.Helper()
 	_, err := fakeGit(c, "update-server-info")
 	require.NoError(tb, err)

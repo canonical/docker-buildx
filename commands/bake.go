@@ -12,11 +12,13 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
 
 	"github.com/containerd/console"
+	"github.com/containerd/containerd/v2/pkg/epoch"
 	"github.com/containerd/platforms"
 	"github.com/docker/buildx/bake"
 	"github.com/docker/buildx/bake/hclparser"
@@ -29,11 +31,14 @@ import (
 	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/desktop"
 	"github.com/docker/buildx/util/dockerutil"
+	"github.com/docker/buildx/util/dockerutil/dockerconfig"
 	"github.com/docker/buildx/util/osutil"
 	"github.com/docker/buildx/util/progress"
 	"github.com/docker/buildx/util/tracing"
+	"github.com/docker/buildx/util/urlutil"
 	"github.com/docker/cli/cli/command"
 	"github.com/moby/buildkit/identity"
+	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -44,14 +49,17 @@ import (
 const (
 	bakeEnvFileSeparator = "BUILDX_BAKE_PATH_SEPARATOR"
 	bakeEnvFilePath      = "BUILDX_BAKE_FILE"
+	bakeEnvFileRelative  = "BUILDX_BAKE_FILE_RELATIVE_PATHS"
 )
 
 type bakeOptions struct {
 	files     []string
 	overrides []string
+	vars      []string
 
 	sbom       string
 	provenance string
+	policy     []string
 	allow      []string
 
 	builder      string
@@ -115,6 +123,14 @@ func runBake(ctx context.Context, dockerCli command.Cli, targets []string, in ba
 	if in.provenance != "" {
 		overrides = append(overrides, fmt.Sprintf("*.attest=%s", buildflags.CanonicalizeAttest("provenance", in.provenance)))
 	}
+
+	policyOverrides, disablePolicy, err := bakePolicyOverrides(in.policy)
+	if err != nil {
+		return err
+	} else if len(policyOverrides) > 0 {
+		overrides = append(overrides, policyOverrides...)
+	}
+
 	contextPathHash, _ := os.Getwd()
 
 	ent, err := bake.ParseEntitlements(in.allow)
@@ -207,9 +223,20 @@ func runBake(ctx context.Context, dockerCli command.Cli, targets []string, in ba
 		"BAKE_CMD_CONTEXT":    cmdContext,
 		"BAKE_LOCAL_PLATFORM": platforms.Format(platforms.DefaultSpec()),
 	}
+	vars, err := parseBakeVars(in.vars)
+	if err != nil {
+		return err
+	}
+	fileRelativePaths, err := bakeFileRelativePaths()
+	if err != nil {
+		return err
+	}
+	parseOpt := bake.ParseOpt{
+		FileRelativePaths: fileRelativePaths,
+	}
 
 	if in.list != "" {
-		cfg, pm, err := bake.ParseFiles(files, defaults)
+		cfg, pm, err := bake.ParseFiles(files, defaults, vars, parseOpt)
 		if err != nil {
 			return err
 		}
@@ -228,21 +255,31 @@ func runBake(ctx context.Context, dockerCli command.Cli, targets []string, in ba
 		}
 	}
 
-	tgts, grps, err := bake.ReadTargets(ctx, files, targets, overrides, defaults, &ent)
+	tgts, grps, err := bake.ReadTargets(ctx, files, targets, overrides, defaults, vars, &ent, parseOpt)
 	if err != nil {
 		return err
 	}
-
-	if v := os.Getenv("SOURCE_DATE_EPOCH"); v != "" {
-		// TODO: extract env var parsing to a method easily usable by library consumers
+	if disablePolicy {
+		policy := buildflags.PolicyConfigs{{Disabled: true}}
 		for _, t := range tgts {
-			if _, ok := t.Args["SOURCE_DATE_EPOCH"]; ok {
-				continue
-			}
+			t.Policy = slices.Clone(policy)
+		}
+	}
+
+	var sourceDateEpoch *string
+	for _, t := range tgts {
+		if _, ok := t.Args[epoch.SourceDateEpochEnv]; ok {
+			continue
+		}
+
+		v := os.Getenv(epoch.SourceDateEpochEnv)
+		sourceDateEpoch = &v
+
+		if *sourceDateEpoch != "" {
 			if t.Args == nil {
 				t.Args = map[string]*string{}
 			}
-			t.Args["SOURCE_DATE_EPOCH"] = &v
+			t.Args[epoch.SourceDateEpochEnv] = sourceDateEpoch
 		}
 	}
 
@@ -250,6 +287,16 @@ func runBake(ctx context.Context, dockerCli command.Cli, targets []string, in ba
 	bo, err := bake.TargetsToBuildOpt(tgts, inp)
 	if err != nil {
 		return err
+	}
+
+	// make sure local credentials aren't loaded multiple times for different targets
+	authProvider := authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
+		AuthConfigProvider: dockerconfig.LoadAuthConfig(dockerCli),
+	})
+
+	for k, opt := range bo {
+		opt.Session = append(opt.Session, authProvider)
+		bo[k] = opt
 	}
 
 	def := struct {
@@ -291,7 +338,11 @@ func runBake(ctx context.Context, dockerCli command.Cli, targets []string, in ba
 	if err != nil {
 		return err
 	}
-	if progressMode != progressui.RawJSONMode {
+	if progressMode == progressui.RawJSONMode {
+		if exp.LocalOutputDelete {
+			return errors.Errorf("additional privileges requested: pass %q to grant requested privileges", "--allow="+string(bake.EntitlementKeyBuildxLocalDelete))
+		}
+	} else {
 		if err := exp.Prompt(ctx, url != "", &syncWriter{w: dockerCli.Err(), wait: printer.Wait}); err != nil {
 			return err
 		}
@@ -503,7 +554,9 @@ func bakeCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	flags.BoolVar(&options.exportPush, "push", false, `Shorthand for "--set=*.output=type=registry". Conditional.`)
 	flags.StringVar(&options.sbom, "sbom", "", `Shorthand for "--set=*.attest=type=sbom"`)
 	flags.StringVar(&options.provenance, "provenance", "", `Shorthand for "--set=*.attest=type=provenance"`)
+	flags.StringArrayVar(&options.policy, "policy", []string{}, `Global policy evaluation options (format: "[disabled=true|false][,strict=true|false][,log-level=level]")`)
 	flags.StringArrayVar(&options.overrides, "set", nil, `Override target value (e.g., "targetpattern.key=value")`)
+	flags.StringArrayVar(&options.vars, "var", nil, `Set a variable value (e.g., "name=value")`)
 	flags.StringVar(&options.callFunc, "call", "build", `Set method for evaluating build ("check", "outline", "targets")`)
 	flags.StringArrayVar(&options.allow, "allow", nil, "Allow build to access specified resources")
 
@@ -526,7 +579,31 @@ func bakeCmd(dockerCli command.Cli, rootOpts *rootOptions) *cobra.Command {
 	return cmd
 }
 
-func bakeEnvFiles(lookup func(string string) (string, bool)) ([]string, error) {
+func bakePolicyOverrides(in []string) ([]string, bool, error) {
+	configs, err := buildflags.ParsePolicyConfigs(in)
+	if err != nil {
+		return nil, false, err
+	}
+	overrides := make([]string, 0, len(in))
+	for i, cfg := range configs {
+		if len(cfg.Files) > 0 {
+			return nil, false, errors.New(`--policy does not accept filename; define policy files in the bake definition`)
+		}
+		if cfg.Reset {
+			return nil, false, errors.New(`--policy does not accept reset; define policy composition in the bake definition`)
+		}
+		if cfg.Disabled {
+			if cfg.Strict != nil || cfg.LogLevel != nil || len(configs) > 1 {
+				return nil, false, errors.New("disabled policy cannot be combined with other policy flags")
+			}
+			return nil, true, nil
+		}
+		overrides = append(overrides, "*.policy+="+in[i])
+	}
+	return overrides, false, nil
+}
+
+func bakeEnvFiles(lookup func(string) (string, bool)) ([]string, error) {
 	sep, _ := lookup(bakeEnvFileSeparator)
 	if sep == "" {
 		sep = string(os.PathListSeparator)
@@ -595,15 +672,27 @@ func saveLocalStateGroup(dockerCli command.Cli, in bakeOptions, targets []string
 // from the command line arguments.
 func bakeArgs(args []string) (url, cmdContext string, targets []string) {
 	cmdContext, targets = "cwd://", args
-	if len(targets) == 0 || !build.IsRemoteURL(targets[0]) {
+	if len(targets) == 0 || !urlutil.IsRemoteURL(targets[0]) {
 		return url, cmdContext, targets
 	}
 	url, targets = targets[0], targets[1:]
-	if len(targets) == 0 || !build.IsRemoteURL(targets[0]) {
+	if len(targets) == 0 || !urlutil.IsRemoteURL(targets[0]) {
 		return url, cmdContext, targets
 	}
 	cmdContext, targets = targets[0], targets[1:]
 	return url, cmdContext, targets
+}
+
+func bakeFileRelativePaths() (bool, error) {
+	v := strings.TrimSpace(os.Getenv(bakeEnvFileRelative))
+	if v == "" {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to parse %s value %q", bakeEnvFileRelative, v)
+	}
+	return enabled, nil
 }
 
 func readBakeFiles(ctx context.Context, nodes []builder.Node, url string, names []string, stdin io.Reader, pw progress.Writer, filesFromEnv bool) (files []bake.File, inp *bake.Input, err error) {
@@ -703,6 +792,27 @@ func parseList(input string) (listEntry, error) {
 	}
 
 	return res, nil
+}
+
+func parseBakeVars(values []string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	vars := make(map[string]string, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		key, val, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, errors.Errorf("invalid variable %q, expected key=value", value)
+		}
+		if key == "" {
+			return nil, errors.Errorf("invalid variable %q, key is empty", value)
+		}
+		vars[key] = val
+	}
+	return vars, nil
 }
 
 func printVars(w io.Writer, format string, vars []*hclparser.Variable) error {
