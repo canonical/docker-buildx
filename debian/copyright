@@ -31,18 +31,6 @@ Files: vendor/k8s.io/*
 Copyright: 2014-2022 The Kubernetes Authors
 License: Apache-2.0
 
-Files: vendor/k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json/*
-Copyright: 2020-2022 The Go Authors
-License: BSD-3-clause-Google
-
-Files: vendor/k8s.io/kube-openapi/pkg/validation/spec/*
-Copyright: 2015 go-swagger maintainers
-License: Apache-2.0
-
-Files: vendor/k8s.io/kube-openapi/pkg/validation/spec/gnostic.go
-Copyright: 2022 The Kubernetes Authors
-License: Apache-2.0
-
 Files: vendor/k8s.io/utils/internal/third_party/forked/golang/*
 Copyright: 2009-2012 The Go Authors
 License: BSD-3-clause-Google
@@ -199,17 +187,6 @@ Files: vendor/github.com/moby/buildkit/util/tracing/otlptracegrpc/*
 Copyright: The OpenTelemetry Authors
 License: Apache-2.0
 
-Files: vendor/github.com/gogo/protobuf/*
-Copyright: 2010-2017 The Go Authors
-           2013 The GoGo Authors
-License: BSD-3-clause-Google
-
-Files: vendor/github.com/gogo/protobuf/*/*_gogo.go
-       vendor/github.com/gogo/protobuf/proto/wrappers.go
-       vendor/github.com/gogo/protobuf/sortkeys/sortkeys.go
-Copyright: 2013-2018 The GoGo Authors
-License: BSD-2-clause
-
 Files: vendor/google.golang.org/genproto/googleapis/*
 Copyright: 2024 Google LLC
 License: Apache-2.0
@@ -237,10 +214,6 @@ License: Apache-2.0
 Files: vendor/github.com/google/go-cmp/*
 Copyright: 2017-2020 The Go Authors
 License: BSD-3-clause-Google
-
-Files: vendor/github.com/google/gnostic-models/*
-Copyright: 2017-2020 Google LLC
-License: Apache-2.0
 
 Files: vendor/github.com/google/shlex/*
 Copyright: 2012 Google Inc
@@ -292,14 +265,6 @@ Files: vendor/github.com/in-toto/in-toto-golang/in_toto/match.go
 Copyright: 2010 The Go Authors
 License: BSD-3-clause-Google
 
-Files: vendor/github.com/emicklei/go-restful/v3/*
-Copyright: 2012-2021 Ernest Micklei
-License: Expat
-
-Files: vendor/github.com/mailru/easyjson/*
-Copyright: 2016 Mail.Ru Group
-License: Expat
-
 Files: vendor/github.com/hashicorp/*
 Copyright: Hashicorp
 License: MPL-2.0
@@ -341,10 +306,6 @@ Files: vendor/github.com/pelletier/go-toml/*
 Copyright: 2013-2021 Thomas Pelletier, Eric Anderton
 License: Expat
 
-Files: vendor/github.com/pelletier/go-toml/localtime.go
-Copyright: 2016 Google LLC
-License: Apache-2.0
-
 Files: vendor/github.com/Masterminds/semver/v3/*
 Copyright: 2014-2019 Matt Butcher and Matt Farina
 License: Expat
@@ -355,10 +316,6 @@ License: Expat
 
 Files: vendor/github.com/tonistiigi/vt100/*
 Copyright: 2015 James Aguilar
-License: Expat
-
-Files: vendor/github.com/josharian/intern/*
-Copyright: 2019 Josh Bleecher Snyder
 License: Expat
 
 Files: vendor/github.com/go-openapi/*
@@ -393,10 +350,6 @@ Files: vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/pattern.go
 Copyright: 2009 The Go Authors
            2015, Gengo, Inc
 License: BSD-3-clause-Generic
-
-Files: vendor/github.com/golang/protobuf/*
-Copyright: 2010-2019 The Go Authors
-License: BSD-3-clause-Google
 
 Files: vendor/github.com/mitchellh/*
 Copyright: 2013-2014 Mitchell Hashimoto
@@ -450,6 +403,247 @@ License: Apache-2.0
 Files: vendor/github.com/google/go-dap/*
 Copyright: 2020-2021, Google LLC
 License: Apache-2.0
+
+Files: vendor/github.com/ProtonMail/go-crypto/*
+Copyright: 2009 The Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/agnivade/levenshtein/*
+Copyright: 2015 Agniva De Sarker
+License: Expat
+
+Files: vendor/github.com/asaskevich/govalidator/*
+Copyright: 2014-2020 Alex Saskevich
+License: Expat
+
+Files: vendor/github.com/blang/semver/*
+Copyright: 2014 Benedikt Lang <github at benediktlang.de>
+License: Expat
+
+Files: vendor/github.com/cespare/xxhash/v2/*
+Copyright: 2016 Caleb Spare
+License: Expat
+
+Files: vendor/github.com/clipperhouse/uax29/v2/*
+Copyright: 2020 Matt Sherman
+License: Expat
+
+Files: vendor/github.com/cloudflare/circl/*
+Copyright: 2019 Cloudflare
+           2009-2015 The Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/creack/pty/*
+Copyright: 2011 Keith Rarick
+License: Expat
+
+Files: vendor/github.com/cyberphone/json-canonicalization/*
+Copyright: 2018 Anders Rundgren
+License: Apache-2.0
+
+Files: vendor/github.com/decred/dcrd/dcrec/secp256k1/v4/*
+Copyright: 2013-2017 The btcsuite developers
+License: ISC
+
+Files: vendor/github.com/digitorus/pkcs7/*
+Copyright: 2015 Andrew Smith
+License: Expat
+
+Files: vendor/github.com/digitorus/timestamp/*
+Copyright: 2017 Digitorus B.V.
+License: BSD-2-clause
+
+Files: vendor/github.com/fxamacker/cbor/v2/*
+Copyright: 2019 Faye Amacker
+License: Expat
+
+Files: vendor/github.com/go-viper/mapstructure/v2/*
+Copyright: 2013 Mitchell Hashimoto
+License: Expat
+
+Files: vendor/github.com/gobwas/glob/*
+Copyright: 2016 Sergey Kamardin
+License: Expat
+
+Files: vendor/github.com/goccy/go-json/*
+Copyright: 2020 Masaaki Goshima
+License: Expat
+
+Files: vendor/github.com/golang/snappy/*
+Copyright: 2011 The Snappy-Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/google/certificate-transparency-go/*
+Copyright: 2015-2021 Google LLC
+License: Apache-2.0
+
+Files: vendor/github.com/google/certificate-transparency-go/x509/*
+       vendor/github.com/google/certificate-transparency-go/asn1/*
+Copyright: 2009-2015 The Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/google/go-containerregistry/*
+Copyright: 2018 Google LLC
+License: Apache-2.0
+
+Files: vendor/github.com/gorilla/websocket/*
+Copyright: 2013 The Gorilla WebSocket Authors
+License: BSD-2-clause
+
+Files: vendor/github.com/hiddeco/sshsig/*
+Copyright: Hidde Beydals
+License: Apache-2.0
+
+Files: vendor/github.com/in-toto/attestation/*
+Copyright: 2021 in-toto Developers
+License: Apache-2.0
+
+Files: vendor/github.com/lestrrat-go/*
+Copyright: 2015-2025 lestrrat-go
+License: Expat
+
+Files: vendor/github.com/mattn/go-runewidth/*
+Copyright: 2016 Yasuhiro Matsumoto
+License: Expat
+
+Files: vendor/github.com/oklog/ulid/v2/*
+Copyright: 2016 The Oklog Authors
+License: Apache-2.0
+
+Files: vendor/github.com/open-policy-agent/opa/*
+Copyright: The OPA Authors
+License: Apache-2.0
+
+Files: vendor/github.com/open-policy-agent/opa/internal/edittree/bitvector/*
+Copyright: 2014 Dropbox, Inc.
+License: BSD-3-clause-Generic
+
+Files: vendor/github.com/open-policy-agent/opa/v1/topdown/regex_template.go
+Copyright: 2012 The Gorilla Authors
+           2012 Rodrigo Moraes
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/package-url/packageurl-go/*
+Copyright: the purl authors
+License: Expat
+
+Files: vendor/github.com/pkg/browser/*
+Copyright: 2014 Dave Cheney <dave@cheney.net>
+License: BSD-2-clause
+
+Files: vendor/github.com/planetscale/vtprotobuf/*
+Copyright: 2021 PlanetScale Inc.
+           2013 The GoGo Authors
+           2018 The Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/rcrowley/go-metrics/*
+Copyright: 2012 Richard Crowley
+License: BSD-2-clause
+
+Files: vendor/github.com/russross/blackfriday/v2/*
+Copyright: 2011 Russ Ross
+License: BSD-2-clause
+
+Files: vendor/github.com/segmentio/asm/*
+Copyright: 2023 Segment
+License: MIT-0
+
+Files: vendor/github.com/sigstore/protobuf-specs/*
+Copyright: The Sigstore Authors
+License: Apache-2.0
+
+Files: vendor/github.com/sigstore/rekor/*
+Copyright: The Rekor Authors
+License: Apache-2.0
+
+Files: vendor/github.com/sigstore/rekor-tiles/v2/*
+Copyright: The Sigstore Authors
+License: Apache-2.0
+
+Files: vendor/github.com/sigstore/sigstore/*
+Copyright: The Sigstore Authors
+License: Apache-2.0
+
+Files: vendor/github.com/sigstore/sigstore-go/*
+Copyright: The Sigstore Authors
+License: Apache-2.0
+
+Files: vendor/github.com/sigstore/timestamp-authority/v2/*
+Copyright: The Sigstore Authors
+License: Apache-2.0
+
+Files: vendor/github.com/tchap/go-patricia/v2/*
+Copyright: 2014 The AUTHORS
+License: Expat
+
+Files: vendor/github.com/theupdateframework/go-tuf/v2/*
+Copyright: 2024 The Update Framework Authors
+License: Apache-2.0
+
+Files: vendor/github.com/transparency-dev/formats/*
+Copyright: 2021 Google LLC
+License: Apache-2.0
+
+Files: vendor/github.com/transparency-dev/merkle/*
+Copyright: 2017 Google LLC
+License: Apache-2.0
+
+Files: vendor/github.com/valyala/fastjson/*
+Copyright: 2018 Aliaksandr Valialkin
+License: Expat
+
+Files: vendor/github.com/vektah/gqlparser/v2/*
+Copyright: 2018 Adam Scarr
+License: Expat
+
+Files: vendor/github.com/x448/float16/*
+Copyright: 2019 Montgomery Edwards⁴⁴⁸ and Faye Amacker
+License: Expat
+
+Files: vendor/github.com/xeipuuv/gojsonpointer/*
+       vendor/github.com/xeipuuv/gojsonreference/*
+Copyright: 2015 xeipuuv <https://github.com/xeipuuv>
+License: Apache-2.0
+
+Files: vendor/github.com/xhit/go-str2duration/v2/*
+Copyright: 2009 The Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/yashtewari/glob-intersection/*
+Copyright: Yash Tewari
+License: Apache-2.0
+
+Files: vendor/github.com/youmark/pkcs8/*
+Copyright: 2014 youmark
+License: Expat
+
+Files: vendor/go.yaml.in/yaml/v3/*
+Copyright: 2011-2019 Canonical Ltd
+License: Apache-2.0
+
+Files: vendor/go.yaml.in/yaml/v3/apic.go
+       vendor/go.yaml.in/yaml/v3/emitterc.go
+       vendor/go.yaml.in/yaml/v3/parserc.go
+       vendor/go.yaml.in/yaml/v3/readerc.go
+       vendor/go.yaml.in/yaml/v3/scannerc.go
+       vendor/go.yaml.in/yaml/v3/writerc.go
+       vendor/go.yaml.in/yaml/v3/yamlh.go
+       vendor/go.yaml.in/yaml/v3/yamlprivateh.go
+Copyright: 2011-2019 Canonical Ltd
+           2006-2010 Kirill Simonov
+License: Expat
+
+Files: vendor/go.yaml.in/yaml/v4/*
+Copyright: 2011-2019 Canonical Ltd
+           2025 The go-yaml Project Contributors
+License: Apache-2.0
+
+Files: vendor/go.yaml.in/yaml/v4/internal/libyaml/*
+Copyright: 2011-2019 Canonical Ltd
+           2006-2010 Kirill Simonov
+           2025 The go-yaml Project Contributors
+License: Expat
 
 License: Apache-2.0
  Licensed under the Apache License, Version 2.0 (the "License");
@@ -556,6 +750,20 @@ License: Expat
  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  SOFTWARE.
+
+License: MIT-0
+ Permission is hereby granted, free of charge, to any person obtaining a copy of this
+ software and associated documentation files (the "Software"), to deal in the Software
+ without restriction, including without limitation the rights to use, copy, modify,
+ merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+ permit persons to whom the Software is furnished to do so.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 License: MPL-2.0
  Mozilla Public License, version 2.0
