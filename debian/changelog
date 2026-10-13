@@ -1,3 +1,9 @@
+docker-buildx (0.36.1-0ubuntu1~26.04.1) resolute; urgency=medium
+
+  * Backport from stonking to resolute (LP: #2153483)
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Tue, 13 Oct 2026 11:54:11 -0300
+
 docker-buildx (0.36.1-0ubuntu1) stonking; urgency=medium
 
   * New upstream version 0.36.1
