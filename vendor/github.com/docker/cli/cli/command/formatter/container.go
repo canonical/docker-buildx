@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.23
+//go:build go1.25
 
 package formatter
 
@@ -13,21 +13,22 @@ import (
 
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/container"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
 	defaultContainerTableFormat = "table {{.ID}}\t{{.Image}}\t{{.Command}}\t{{.RunningFor}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}"
 
-	namesHeader      = "NAMES"
-	commandHeader    = "COMMAND"
-	runningForHeader = "CREATED"
-	mountsHeader     = "MOUNTS"
-	localVolumes     = "LOCAL VOLUMES"
-	networksHeader   = "NETWORKS"
-	platformHeader   = "PLATFORM"
+	namesHeader        = "NAMES"
+	commandHeader      = "COMMAND"
+	runningForHeader   = "CREATED"
+	mountsHeader       = "MOUNTS"
+	localVolumes       = "LOCAL VOLUMES"
+	networksHeader     = "NETWORKS"
+	platformHeader     = "PLATFORM"
+	healthStatusHeader = "HEALTH STATUS"
 )
 
 // Platform wraps a [ocispec.Platform] to implement the stringer interface.
@@ -121,6 +122,7 @@ func NewContainerContext() *ContainerContext {
 		"LocalVolumes": localVolumes,
 		"Networks":     networksHeader,
 		"Platform":     platformHeader,
+		"HealthStatus": healthStatusHeader,
 	}
 	return &containerCtx
 }
@@ -141,25 +143,36 @@ func (c *ContainerContext) ID() string {
 
 // Names returns a comma-separated string of the container's names, with their
 // slash (/) prefix stripped. Additional names for the container (related to the
-// legacy `--link` feature) are omitted.
+// legacy `--link` feature) are omitted when formatting "truncated".
 func (c *ContainerContext) Names() string {
-	names := StripNamePrefix(c.c.Names)
-	if c.trunc {
-		for _, name := range names {
-			if len(strings.Split(name, "/")) == 1 {
-				names = []string{name}
-				break
+	var b strings.Builder
+	for i, n := range c.c.Names {
+		name := strings.TrimPrefix(n, "/")
+		if c.trunc {
+			// When printing truncated, we only print a single name.
+			//
+			// Pick the first name that's not a legacy link (does not have
+			// slashes inside the name itself (e.g., "/other-container/link")).
+			// Normally this would be the first name found.
+			if strings.IndexByte(name, '/') == -1 {
+				return name
 			}
+			continue
 		}
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(name)
 	}
-	return strings.Join(names, ",")
+	return b.String()
 }
 
-// StripNamePrefix removes prefix from string, typically container names as returned by `ContainersList` API
+// StripNamePrefix removes any "/" prefix from container names returned
+// by the "ContainersList" API.
 func StripNamePrefix(ss []string) []string {
 	sss := make([]string, len(ss))
 	for i, s := range ss {
-		sss[i] = s[1:]
+		sss[i] = strings.TrimPrefix(s, "/")
 	}
 	return sss
 }
@@ -170,27 +183,33 @@ func (c *ContainerContext) Image() string {
 	if c.c.Image == "" {
 		return "<no image>"
 	}
-	if c.trunc {
-		if trunc := TruncateID(c.c.ImageID); trunc == TruncateID(c.c.Image) {
-			return trunc
+	if !c.trunc {
+		return c.c.Image
+	}
+	if trunc := TruncateID(c.c.ImageID); trunc == TruncateID(c.c.Image) {
+		return trunc
+	}
+	ref, err := reference.ParseNormalizedNamed(c.c.Image)
+	if err != nil {
+		return c.c.Image
+	}
+
+	if _, ok := ref.(reference.Digested); ok {
+		// strip the digest, but preserve the tag (if any)
+		var tag string
+		if t, ok := ref.(reference.Tagged); ok {
+			tag = t.Tag()
 		}
-		// truncate digest if no-trunc option was not selected
-		ref, err := reference.ParseNormalizedNamed(c.c.Image)
-		if err == nil {
-			if nt, ok := ref.(reference.NamedTagged); ok {
-				// case for when a tag is provided
-				if namedTagged, err := reference.WithTag(reference.TrimNamed(nt), nt.Tag()); err == nil {
-					return reference.FamiliarString(namedTagged)
-				}
-			} else {
-				// case for when a tag is not provided
-				named := reference.TrimNamed(ref)
-				return reference.FamiliarString(named)
+		ref = reference.TrimNamed(ref)
+		if tag != "" {
+			if out, err := reference.WithTag(ref, tag); err == nil {
+				ref = out
 			}
 		}
 	}
 
-	return c.c.Image
+	// Format as "familiar" name with "docker.io[/library]" trimmed.
+	return reference.FamiliarString(ref)
 }
 
 // Command returns's the container's command. If the trunc option is set, the
@@ -241,7 +260,7 @@ func (c *ContainerContext) Ports() string {
 // State returns the container's current state (e.g. "running" or "paused").
 // Refer to [container.ContainerState] for possible states.
 func (c *ContainerContext) State() string {
-	return c.c.State
+	return string(c.c.State)
 }
 
 // Status returns the container's status in a human readable form (for example,
@@ -335,16 +354,45 @@ func (c *ContainerContext) Networks() string {
 	return strings.Join(networks, ",")
 }
 
+// HealthStatus returns the container's health status (for example, "healthy","unhealthy", or "starting").
+// If no healthcheck is configured, an empty
+// string is returned.
+func (c *ContainerContext) HealthStatus() string {
+	if c.c.Health != nil && c.c.Health.Status != "" {
+		return string(c.c.Health.Status)
+	}
+
+	// Fallback for API versions before v1.52, which include health only in Status text;
+	// see https://github.com/moby/moby/pull/50281
+	// see https://github.com/moby/moby/blob/docker-v29.4.3/daemon/container/health.go#L18-L43
+	_, health, ok := strings.Cut(c.c.Status, "(")
+	if !ok || !strings.HasSuffix(health, ")") {
+		return ""
+	}
+
+	health = strings.TrimSuffix(health, ")")
+	health = strings.TrimPrefix(health, "health: ")
+
+	switch container.HealthStatus(health) {
+	case container.Healthy, container.Unhealthy, container.Starting:
+		return health
+	case container.NoHealthcheck:
+		return ""
+	default:
+		return ""
+	}
+}
+
 // DisplayablePorts returns formatted string representing open ports of container
 // e.g. "0.0.0.0:80->9090/tcp, 9988/tcp"
 // it's used by command 'docker ps'
-func DisplayablePorts(ports []container.Port) string {
+func DisplayablePorts(ports []container.PortSummary) string {
 	type portGroup struct {
 		first uint16
 		last  uint16
 	}
 	groupMap := make(map[string]*portGroup)
-	var result []string //nolint:prealloc
+	var result []string
 	var hostMappings []string
 	var groupMapKeys []string
 	sort.Slice(ports, func(i, j int) bool {
@@ -354,13 +402,13 @@ func DisplayablePorts(ports []container.Port) string {
 	for _, port := range ports {
 		current := port.PrivatePort
 		portKey := port.Type
-		if port.IP != "" {
+		if port.IP.IsValid() {
 			if port.PublicPort != current {
-				hAddrPort := net.JoinHostPort(port.IP, strconv.Itoa(int(port.PublicPort)))
+				hAddrPort := net.JoinHostPort(port.IP.String(), strconv.Itoa(int(port.PublicPort)))
 				hostMappings = append(hostMappings, fmt.Sprintf("%s->%d/%s", hAddrPort, port.PrivatePort, port.Type))
 				continue
 			}
-			portKey = port.IP + "/" + port.Type
+			portKey = port.IP.String() + "/" + port.Type
 		}
 		group := groupMap[portKey]
 
@@ -404,13 +452,13 @@ func formGroup(key string, start, last uint16) string {
 	return group + "/" + groupType
 }
 
-func comparePorts(i, j container.Port) bool {
+func comparePorts(i, j container.PortSummary) bool {
 	if i.PrivatePort != j.PrivatePort {
 		return i.PrivatePort < j.PrivatePort
 	}
 
 	if i.IP != j.IP {
-		return i.IP < j.IP
+		return i.IP.String() < j.IP.String()
 	}
 
 	if i.PublicPort != j.PublicPort {

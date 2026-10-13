@@ -26,16 +26,22 @@ type debugOptions struct {
 	OnFlag string
 }
 
+type debuggerInfo struct {
+	Name      string
+	UserAgent string
+}
+
 // debuggerOptions will start a debuggerOptions instance.
 type debuggerOptions interface {
 	New(in ioset.In) (debuggerInstance, error)
+	Info() debuggerInfo
 }
 
 // debuggerInstance is an instance of a Debugger that has been started.
 type debuggerInstance interface {
 	Start(printer *progress.Printer, opts *BuildOptions) error
 	Handler() build.Handler
-	Stop() error
+	Stop(retErr error) error
 	Out() io.Writer
 }
 
@@ -71,6 +77,12 @@ func (d *debugOptions) New(in ioset.In) (debuggerInstance, error) {
 	}, nil
 }
 
+func (d *debugOptions) Info() debuggerInfo {
+	return debuggerInfo{
+		Name: "debug",
+	}
+}
+
 type monitorDebuggerInstance struct {
 	cfg *build.InvokeConfig
 	in  io.ReadCloser
@@ -86,7 +98,7 @@ func (d *monitorDebuggerInstance) Handler() build.Handler {
 	return d.m.Handler()
 }
 
-func (d *monitorDebuggerInstance) Stop() error {
+func (d *monitorDebuggerInstance) Stop(_ error) error {
 	return d.m.Close()
 }
 
