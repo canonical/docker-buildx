@@ -23,6 +23,7 @@ import (
 	"github.com/moby/buildkit/identity"
 	provenancetypes "github.com/moby/buildkit/solver/llbsolver/provenance/types"
 	"github.com/moby/buildkit/util/contentutil"
+	bkgitutil "github.com/moby/buildkit/util/gitutil"
 	"github.com/moby/buildkit/util/testutil"
 	"github.com/moby/buildkit/util/testutil/integration"
 	"github.com/pkg/errors"
@@ -40,9 +41,13 @@ var bakeTests = []func(t *testing.T, sb integration.Sandbox){
 	testBakePrint,
 	testBakePrintSensitive,
 	testBakePrintOverrideEmpty,
+	testBakeSecretSourceOverride,
 	testBakePrintKeepEscaped,
+	testBakePrintRemoteContextSubdir,
 	testBakeLocal,
 	testBakeLocalMulti,
+	testBakeFileRelativePaths,
+	testBakeLocalExportDeleteMode,
 	testBakeRemote,
 	testBakeRemoteAuth,
 	testBakeRemoteCmdContext,
@@ -50,6 +55,8 @@ var bakeTests = []func(t *testing.T, sb integration.Sandbox){
 	testBakeLocalCwdOverride,
 	testBakeRemoteCmdContextOverride,
 	testBakeRemoteContextSubdir,
+	testBakeRemoteNamedContextSubdir,
+	testBakeRemoteNamedContextDot,
 	testBakeRemoteCmdContextEscapeRoot,
 	testBakeRemoteCmdContextEscapeRelative,
 	testBakeRemoteDockerfileCwd,
@@ -72,6 +79,7 @@ var bakeTests = []func(t *testing.T, sb integration.Sandbox){
 	testBakeMetadataWarningsDedup,
 	testBakeMultiExporters,
 	testBakeLoadPush,
+	testBakeNoDefaultOCIArtifact,
 	testBakeListTargets,
 	testBakeListVariables,
 	testBakeListTypedVariables,
@@ -82,6 +90,8 @@ var bakeTests = []func(t *testing.T, sb integration.Sandbox){
 	testBakeCheckCallOutput,
 	testBakeExtraHosts,
 	testBakeFileFromEnvironment,
+	testBakeDisableEnvLookup,
+	testBakeVarOverride,
 }
 
 func testBakePrint(t *testing.T, sb integration.Sandbox) {
@@ -169,6 +179,140 @@ RUN echo "Hello ${HELLO}"
   }
 }
 `, stdout.String())
+		})
+	}
+}
+
+func testBakeDisableEnvLookup(t *testing.T, sb integration.Sandbox) {
+	testCases := []struct {
+		name string
+		f    string
+		dt   []byte
+	}{
+		{
+			name: "HCL",
+			f:    "docker-bake.hcl",
+			dt: []byte(`
+variable "HELLO" {
+  default = "fallback"
+}
+
+target "build" {
+  args = {
+    HELLO = HELLO
+  }
+}
+`),
+		},
+		{
+			name: "Compose",
+			f:    "compose.yml",
+			dt: []byte(`
+services:
+  build:
+    build:
+      context: .
+      args:
+        HELLO: ${HELLO:-fallback}
+`),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tmpdir(
+				t,
+				fstest.CreateFile(tc.f, tc.dt, 0600),
+				fstest.CreateFile("Dockerfile", []byte(`
+FROM busybox
+ARG HELLO
+RUN echo "Hello ${HELLO}"
+`), 0600),
+			)
+
+			cmd := buildxCmd(
+				sb,
+				withDir(dir),
+				withArgs("bake", "--print", "build"),
+				withEnv(
+					"BUILDX_BAKE_DISABLE_VARS_ENV_LOOKUP=1",
+					"HELLO=fromenv",
+				),
+			)
+			stdout := bytes.Buffer{}
+			stderr := bytes.Buffer{}
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			require.NoError(t, cmd.Run(), stdout.String(), stderr.String())
+
+			require.Contains(t, stdout.String(), `"HELLO": "fallback"`)
+			require.NotContains(t, stdout.String(), "fromenv")
+		})
+	}
+}
+
+func testBakeVarOverride(t *testing.T, sb integration.Sandbox) {
+	testCases := []struct {
+		name string
+		f    string
+		dt   []byte
+	}{
+		{
+			name: "HCL",
+			f:    "docker-bake.hcl",
+			dt: []byte(`
+variable "HELLO" {
+  default = "fallback"
+}
+
+target "build" {
+  args = {
+    HELLO = HELLO
+  }
+}
+`),
+		},
+		{
+			name: "Compose",
+			f:    "compose.yml",
+			dt: []byte(`
+services:
+  build:
+    build:
+      context: .
+      args:
+        HELLO: ${HELLO:-fallback}
+`),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tmpdir(
+				t,
+				fstest.CreateFile(tc.f, tc.dt, 0600),
+				fstest.CreateFile("Dockerfile", []byte(`
+FROM busybox
+ARG HELLO
+RUN echo "Hello ${HELLO}"
+`), 0600),
+			)
+
+			cmd := buildxCmd(
+				sb,
+				withDir(dir),
+				withArgs("bake", "--print", "build", "--var", "HELLO=fromflag"),
+				withEnv("HELLO=fromenv"),
+			)
+			stdout := bytes.Buffer{}
+			stderr := bytes.Buffer{}
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			require.NoError(t, cmd.Run(), stdout.String(), stderr.String())
+
+			require.Contains(t, stdout.String(), `"HELLO": "fromflag"`)
+			require.NotContains(t, stdout.String(), "fromenv")
+			require.NotContains(t, stdout.String(), "fallback")
 		})
 	}
 }
@@ -333,6 +477,52 @@ target "default" {
 }`, stdout.String())
 }
 
+func testBakeSecretSourceOverride(t *testing.T, sb integration.Sandbox) {
+	bakefile := []byte(`
+target "build" {
+	secret = [
+		"id=aws,src=aws-default",
+		"id=token,env=TOKEN",
+	]
+}
+`)
+	dir := tmpdir(
+		t,
+		fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+		fstest.CreateFile("Dockerfile", []byte("FROM scratch\n"), 0600),
+		fstest.CreateFile("aws-default", []byte("default"), 0600),
+		fstest.CreateFile("tokenfile", []byte("token"), 0600),
+	)
+
+	cmd := buildxCmd(sb, withDir(dir), withArgs(
+		"bake", "--print", "build",
+		"--set", "build.secret.aws=env=AWS_CREDENTIALS",
+		"--set", "build.secret.token=src=tokenfile",
+	))
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), stdout.String(), stderr.String())
+
+	var def struct {
+		Target map[string]*bake.Target `json:"target"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &def))
+	require.Contains(t, def.Target, "build")
+	require.Len(t, def.Target["build"].Secrets, 2)
+	require.Equal(t, "aws", def.Target["build"].Secrets[0].ID)
+	require.Equal(t, "AWS_CREDENTIALS", def.Target["build"].Secrets[0].Env)
+	require.Empty(t, def.Target["build"].Secrets[0].FilePath)
+	require.Equal(t, "token", def.Target["build"].Secrets[1].ID)
+	require.Equal(t, "tokenfile", def.Target["build"].Secrets[1].FilePath)
+	require.Empty(t, def.Target["build"].Secrets[1].Env)
+
+	out, err := bakeCmd(sb, withDir(dir), withArgs("--print", "build", "--set", "build.secret.missing=env=MISSING"))
+	require.Error(t, err)
+	require.Contains(t, out, `secret "missing" must be declared before it can be overridden`)
+}
+
 func testBakePrintKeepEscaped(t *testing.T, sb integration.Sandbox) {
 	bakefile := []byte(`
 target "default" {
@@ -391,6 +581,78 @@ EOT
 	cmd = buildxCmd(sb, withDir(dir), withArgs("bake"))
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
+}
+
+func testBakePrintRemoteContextSubdir(t *testing.T, sb integration.Sandbox) {
+	bakefile := []byte(`
+target default {
+	context = "bar"
+}
+`)
+	dockerfile := []byte(`
+FROM scratch
+COPY super-cool.txt /
+`)
+
+	dir := tmpdir(
+		t,
+		fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+		fstest.CreateDir("bar", 0700),
+		fstest.CreateFile("bar/Dockerfile", dockerfile, 0600),
+		fstest.CreateFile("bar/super-cool.txt", []byte("super cool"), 0600),
+	)
+
+	git, err := gitutil.New(bkgitutil.WithDir(dir))
+	require.NoError(t, err)
+	gittestutil.GitInit(git, t)
+	gittestutil.GitAdd(git, t, "docker-bake.hcl", "bar")
+	gittestutil.GitCommit(git, t, "initial commit")
+	addr := gittestutil.GitServeHTTP(git, t)
+
+	tests := []struct {
+		name            string
+		ref             string
+		expectedContext string
+	}{
+		{
+			name:            "no ref",
+			expectedContext: addr + "#:bar",
+		},
+		{
+			name:            "branch ref",
+			ref:             "main",
+			expectedContext: addr + "#main:bar",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := addr
+			if tt.ref != "" {
+				u += "#" + tt.ref
+			}
+			cmd := buildxCmd(sb, withDir("/tmp"), withArgs("bake", u, "--print"))
+			stdout := bytes.Buffer{}
+			stderr := bytes.Buffer{}
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			require.NoError(t, cmd.Run(), stdout.String(), stderr.String())
+			require.JSONEq(t, fmt.Sprintf(`{
+	"group": {
+		"default": {
+			"targets": [
+				"default"
+			]
+		}
+	},
+	"target": {
+		"default": {
+			"context": %q,
+			"dockerfile": "Dockerfile"
+		}
+	}
+}`, tt.expectedContext), stdout.String())
+		})
+	}
 }
 
 func testBakeLocal(t *testing.T, sb integration.Sandbox) {
@@ -461,6 +723,263 @@ services:
 	require.FileExists(t, filepath.Join(dirDest2, "foo"))
 }
 
+func testBakeFileRelativePaths(t *testing.T, sb integration.Sandbox) {
+	t.Run("compose context", func(t *testing.T) {
+		dockerfile := []byte(`
+FROM scratch
+COPY marker /marker
+COPY --from=shared shared-marker /shared-marker
+`)
+		composefile := []byte(`
+services:
+  debian:
+    build:
+      context: ./dockerfiles/debian
+      additional_contexts:
+        shared: ../shared
+`)
+
+		dir := tmpdir(
+			t,
+			fstest.CreateDir("tests", 0700),
+			fstest.CreateDir("tests/dockerfiles", 0700),
+			fstest.CreateDir("tests/dockerfiles/debian", 0700),
+			fstest.CreateDir("shared", 0700),
+			fstest.CreateFile("tests/docker-compose.yml", composefile, 0600),
+			fstest.CreateFile("tests/dockerfiles/debian/Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("tests/dockerfiles/debian/marker", []byte("marker"), 0600),
+			fstest.CreateFile("shared/shared-marker", []byte("shared"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		out, err := bakeCmd(
+			sb,
+			withDir(dir),
+			withArgs("--file", "tests/docker-compose.yml", "--set", "*.output=type=local,dest="+dirDest),
+			withEnv("BUILDX_BAKE_FILE_RELATIVE_PATHS=1"),
+		)
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dirDest, "marker"))
+		require.FileExists(t, filepath.Join(dirDest, "shared-marker"))
+	})
+
+	t.Run("compose project", func(t *testing.T) {
+		composefile := []byte(`
+services:
+  app:
+    build:
+      context: ./app
+      dockerfile_inline: |
+        FROM scratch
+        COPY marker /marker
+        COPY --from=shared shared-marker /shared-marker
+`)
+		overridefile := []byte(`
+services:
+  app:
+    build:
+      additional_contexts:
+        shared: ./shared
+`)
+
+		dir := tmpdir(
+			t,
+			fstest.CreateDir("project", 0700),
+			fstest.CreateDir("project/app", 0700),
+			fstest.CreateDir("project/shared", 0700),
+			fstest.CreateDir("overrides", 0700),
+			fstest.CreateFile("project/compose.yml", composefile, 0600),
+			fstest.CreateFile("project/app/marker", []byte("marker"), 0600),
+			fstest.CreateFile("project/shared/shared-marker", []byte("shared"), 0600),
+			fstest.CreateFile("overrides/compose.yml", overridefile, 0600),
+		)
+		dirDest := t.TempDir()
+
+		out, err := bakeCmd(
+			sb,
+			withDir(dir),
+			withArgs("--file", "project/compose.yml", "--file", "overrides/compose.yml", "--set", "app.output=type=local,dest="+dirDest),
+			withEnv("BUILDX_BAKE_FILE_RELATIVE_PATHS=1"),
+		)
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dirDest, "marker"))
+		require.FileExists(t, filepath.Join(dirDest, "shared-marker"))
+	})
+
+	t.Run("default context", func(t *testing.T) {
+		bakefile := []byte(`
+target "default" {
+  dockerfile-inline = <<EOT
+FROM scratch
+COPY marker /marker
+EOT
+}
+`)
+
+		dir := tmpdir(
+			t,
+			fstest.CreateDir("definitions", 0700),
+			fstest.CreateFile("definitions/docker-bake.hcl", bakefile, 0600),
+			fstest.CreateFile("definitions/marker", []byte("marker"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		out, err := bakeCmd(
+			sb,
+			withDir(dir),
+			withArgs("--file", "definitions/docker-bake.hcl", "--set", "*.output=type=local,dest="+dirDest),
+			withEnv("BUILDX_BAKE_FILE_RELATIVE_PATHS=1"),
+		)
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dirDest, "marker"))
+	})
+
+	t.Run("hcl target reference", func(t *testing.T) {
+		baseBakefile := []byte(`
+target "base" {
+  context = "basectx"
+}
+`)
+		appBakefile := []byte(`
+target "app" {
+  context = target.base.context
+  dockerfile-inline = <<EOT
+FROM scratch
+COPY marker /marker
+EOT
+}
+`)
+
+		dir := tmpdir(
+			t,
+			fstest.CreateDir("one", 0700),
+			fstest.CreateDir("one/basectx", 0700),
+			fstest.CreateDir("two", 0700),
+			fstest.CreateDir("two/basectx", 0700),
+			fstest.CreateFile("one/docker-bake.hcl", baseBakefile, 0600),
+			fstest.CreateFile("one/basectx/marker", []byte("source-file"), 0600),
+			fstest.CreateFile("two/docker-bake.hcl", appBakefile, 0600),
+			fstest.CreateFile("two/basectx/marker", []byte("consumer-file"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		out, err := bakeCmd(
+			sb,
+			withDir(dir),
+			withArgs("--file", "one/docker-bake.hcl", "--file", "two/docker-bake.hcl", "--set", "app.output=type=local,dest="+dirDest, "app"),
+			withEnv("BUILDX_BAKE_FILE_RELATIVE_PATHS=1"),
+		)
+		require.NoError(t, err, out)
+
+		dt, err := os.ReadFile(filepath.Join(dirDest, "marker"))
+		require.NoError(t, err)
+		require.Equal(t, "source-file", string(dt))
+	})
+
+	t.Run("cwd prefix", func(t *testing.T) {
+		bakefile := []byte(`
+target "default" {
+  context = "cwd://."
+  dockerfile-inline = <<EOT
+FROM scratch
+COPY root-marker /root-marker
+EOT
+}
+`)
+
+		dir := tmpdir(
+			t,
+			fstest.CreateDir("definitions", 0700),
+			fstest.CreateFile("definitions/docker-bake.hcl", bakefile, 0600),
+			fstest.CreateFile("root-marker", []byte("root"), 0600),
+		)
+		dirDest := t.TempDir()
+
+		out, err := bakeCmd(
+			sb,
+			withDir(dir),
+			withArgs("--file", "definitions/docker-bake.hcl", "--set", "*.output=type=local,dest="+dirDest),
+			withEnv("BUILDX_BAKE_FILE_RELATIVE_PATHS=1"),
+		)
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dirDest, "root-marker"))
+	})
+}
+
+func testBakeLocalExportDeleteMode(t *testing.T, sb integration.Sandbox) {
+	dockerfile := []byte(`
+FROM scratch
+COPY foo /foo
+`)
+	bakefile := []byte(`
+target "default" {
+	output = ["type=local,dest=out,mode=delete"]
+}
+`)
+
+	t.Run("definition requires allow", func(t *testing.T) {
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+
+		cmd := buildxCmd(sb, withDir(dir), withArgs("bake", "--progress=rawjson"))
+		out, err := cmd.CombinedOutput()
+		require.Error(t, err, string(out))
+		require.Contains(t, string(out), "--allow=buildx.local.delete")
+	})
+
+	t.Run("set requires allow", func(t *testing.T) {
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("docker-bake.hcl", []byte(`target "default" {}`), 0600),
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+
+		cmd := buildxCmd(sb, withDir(dir), withArgs("bake", "--progress=rawjson", "--set", "*.output=type=local,dest=out,mode=delete"))
+		out, err := cmd.CombinedOutput()
+		require.Error(t, err, string(out))
+		require.Contains(t, string(out), "--allow=buildx.local.delete")
+	})
+
+	t.Run("allow does not accept value", func(t *testing.T) {
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+
+		out, err := bakeCmd(sb, withDir(dir), withArgs("--allow=buildx.local.delete=true"))
+		require.Error(t, err, out)
+		require.Contains(t, out, "buildx.local.delete does not accept a value")
+	})
+
+	t.Run("allow deletes stale files", func(t *testing.T) {
+		skipNoCompatBuildKit(t, sb, ">= 0.31.0-0", "local exporter mode=delete")
+
+		dir := tmpdir(
+			t,
+			fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("foo"), 0600),
+		)
+		dest := filepath.Join(dir, "out")
+		stale := filepath.Join(dest, "stale")
+		require.NoError(t, os.MkdirAll(dest, 0o755))
+		require.NoError(t, os.WriteFile(stale, []byte("stale"), 0o600))
+
+		out, err := bakeCmd(sb, withDir(dir), withArgs("--allow=buildx.local.delete"))
+		require.NoError(t, err, out)
+		require.FileExists(t, filepath.Join(dest, "foo"))
+		_, err = os.Stat(stale)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+}
+
 func testBakeRemote(t *testing.T, sb integration.Sandbox) {
 	bakefile := []byte(`
 target "default" {
@@ -477,7 +996,7 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+	git, err := gitutil.New(bkgitutil.WithDir(dir))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -507,7 +1026,7 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+	git, err := gitutil.New(bkgitutil.WithDir(dir))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -554,7 +1073,7 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	git, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -623,7 +1142,7 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	git, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -657,14 +1176,14 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	gitSpec, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	gitSpec, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 	gittestutil.GitInit(gitSpec, t)
 	gittestutil.GitAdd(gitSpec, t, "docker-bake.hcl")
 	gittestutil.GitCommit(gitSpec, t, "initial commit")
 	addrSpec := gittestutil.GitServeHTTP(gitSpec, t)
 
-	gitSrc, err := gitutil.New(gitutil.WithWorkingDir(dirSrc))
+	gitSrc, err := gitutil.New(bkgitutil.WithDir(dirSrc))
 	require.NoError(t, err)
 	gittestutil.GitInit(gitSrc, t)
 	gittestutil.GitAdd(gitSrc, t, "foo")
@@ -698,7 +1217,7 @@ COPY super-cool.txt /
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dir))
+	git, err := gitutil.New(bkgitutil.WithDir(dir))
 	require.NoError(t, err)
 	gittestutil.GitInit(git, t)
 	gittestutil.GitAdd(git, t, "docker-bake.hcl", "bar")
@@ -709,6 +1228,80 @@ COPY super-cool.txt /
 	require.NoError(t, err, out)
 
 	require.FileExists(t, filepath.Join(dirDest, "super-cool.txt"))
+}
+
+// https://github.com/docker/buildx/issues/3670
+func testBakeRemoteNamedContextSubdir(t *testing.T, sb integration.Sandbox) {
+	bakefile := []byte(`
+target default {
+	context = "./build"
+	dockerfile = "Dockerfile"
+	contexts = {
+		files = "./files-src/"
+	}
+}
+`)
+	dockerfile := []byte(`
+FROM scratch
+COPY --from=files file.txt /file.txt
+`)
+
+	dir := tmpdir(
+		t,
+		fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+		fstest.CreateDir("build", 0700),
+		fstest.CreateFile("build/Dockerfile", dockerfile, 0600),
+		fstest.CreateDir("files-src", 0700),
+		fstest.CreateFile("files-src/file.txt", []byte("hello"), 0600),
+	)
+	dirDest := t.TempDir()
+
+	git, err := gitutil.New(bkgitutil.WithDir(dir))
+	require.NoError(t, err)
+	gittestutil.GitInit(git, t)
+	gittestutil.GitAdd(git, t, "docker-bake.hcl", "build", "files-src")
+	gittestutil.GitCommit(git, t, "initial commit")
+	addr := gittestutil.GitServeHTTP(git, t)
+
+	out, err := bakeCmd(sb, withDir("/tmp"), withArgs(addr, "--set", "*.output=type=local,dest="+dirDest))
+	require.NoError(t, err, out)
+	require.FileExists(t, filepath.Join(dirDest, "file.txt"))
+}
+
+func testBakeRemoteNamedContextDot(t *testing.T, sb integration.Sandbox) {
+	bakefile := []byte(`
+target default {
+	context = "./build"
+	dockerfile = "Dockerfile"
+	contexts = {
+		files = "."
+	}
+}
+`)
+	dockerfile := []byte(`
+FROM scratch
+COPY --from=files marker.txt /marker.txt
+`)
+
+	dir := tmpdir(
+		t,
+		fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+		fstest.CreateDir("build", 0700),
+		fstest.CreateFile("build/Dockerfile", dockerfile, 0600),
+		fstest.CreateFile("marker.txt", []byte("hello"), 0600),
+	)
+	dirDest := t.TempDir()
+
+	git, err := gitutil.New(bkgitutil.WithDir(dir))
+	require.NoError(t, err)
+	gittestutil.GitInit(git, t)
+	gittestutil.GitAdd(git, t, "docker-bake.hcl", "build", "marker.txt")
+	gittestutil.GitCommit(git, t, "initial commit")
+	addr := gittestutil.GitServeHTTP(git, t)
+
+	out, err := bakeCmd(sb, withDir("/tmp"), withArgs(addr, "--set", "*.output=type=local,dest="+dirDest))
+	require.NoError(t, err, out)
+	require.FileExists(t, filepath.Join(dirDest, "marker.txt"))
 }
 
 func testBakeRemoteCmdContextEscapeRoot(t *testing.T, sb integration.Sandbox) {
@@ -738,7 +1331,7 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	git, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -786,7 +1379,7 @@ EOT
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	git, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -842,7 +1435,7 @@ COPY foo /foo
 	)
 	dirDest := t.TempDir()
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	git, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -894,7 +1487,7 @@ COPY foo /foo
 		fstest.CreateFile("foo", []byte("foo"), 0600),
 	)
 
-	git, err := gitutil.New(gitutil.WithWorkingDir(dirSpec))
+	git, err := gitutil.New(bkgitutil.WithDir(dirSpec))
 	require.NoError(t, err)
 
 	gittestutil.GitInit(git, t)
@@ -1638,6 +2231,41 @@ target "default" {
 	require.NoError(t, err)
 
 	// TODO: test metadata file when supported by multi exporters https://github.com/docker/buildx/issues/2181
+}
+
+func testBakeNoDefaultOCIArtifact(t *testing.T, sb integration.Sandbox) {
+	if isMobyWorker(sb) {
+		t.Skip("attestations are not supported by the docker worker")
+	}
+
+	registry, err := sb.NewRegistry()
+	if errors.Is(err, integration.ErrRequirements) {
+		t.Skip(err.Error())
+	}
+	require.NoError(t, err)
+	target := registry + "/buildx/bake-no-default-oci-artifact:latest"
+
+	dockerfile := []byte(`
+FROM scratch
+COPY foo /foo
+`)
+	bakefile := fmt.Appendf(nil, `
+target "default" {
+  output = ["type=image,name=%s,push=true"]
+  attest = ["type=provenance"]
+}
+`, target)
+	dir := tmpdir(
+		t,
+		fstest.CreateFile("docker-bake.hcl", bakefile, 0600),
+		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		fstest.CreateFile("foo", []byte("foo"), 0600),
+	)
+
+	out, err := bakeCmd(sb, withDir(dir), withEnv("BUILDX_NO_DEFAULT_OCI_ARTIFACT=true"))
+	require.NoError(t, err, string(out))
+
+	requireLegacyAttestationStorage(t, sb, target)
 }
 
 func testBakeLoadPush(t *testing.T, sb integration.Sandbox) {

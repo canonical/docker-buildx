@@ -9,24 +9,25 @@ Extended build capabilities with BuildKit
 
 ### Subcommands
 
-| Name                                 | Description                                                     |
-|:-------------------------------------|:----------------------------------------------------------------|
-| [`bake`](buildx_bake.md)             | Build from a file                                               |
-| [`build`](buildx_build.md)           | Start a build                                                   |
-| [`create`](buildx_create.md)         | Create a new builder instance                                   |
-| [`dap`](buildx_dap.md)               | Start debug adapter protocol compatible debugger (EXPERIMENTAL) |
-| [`debug`](buildx_debug.md)           | Start debugger (EXPERIMENTAL)                                   |
-| [`dial-stdio`](buildx_dial-stdio.md) | Proxy current stdio streams to builder instance                 |
-| [`du`](buildx_du.md)                 | Disk usage                                                      |
-| [`history`](buildx_history.md)       | Commands to work on build records                               |
-| [`imagetools`](buildx_imagetools.md) | Commands to work on images in registry                          |
-| [`inspect`](buildx_inspect.md)       | Inspect current builder instance                                |
-| [`ls`](buildx_ls.md)                 | List builder instances                                          |
-| [`prune`](buildx_prune.md)           | Remove build cache                                              |
-| [`rm`](buildx_rm.md)                 | Remove one or more builder instances                            |
-| [`stop`](buildx_stop.md)             | Stop builder instance                                           |
-| [`use`](buildx_use.md)               | Set the current builder instance                                |
-| [`version`](buildx_version.md)       | Show buildx version information                                 |
+| Name                                 | Description                                      |
+|:-------------------------------------|:-------------------------------------------------|
+| [`bake`](buildx_bake.md)             | Build from a file                                |
+| [`build`](buildx_build.md)           | Start a build                                    |
+| [`create`](buildx_create.md)         | Create a new builder instance                    |
+| [`dap`](buildx_dap.md)               | Start debug adapter protocol compatible debugger |
+| [`debug`](buildx_debug.md)           | Start debugger (EXPERIMENTAL)                    |
+| [`dial-stdio`](buildx_dial-stdio.md) | Proxy current stdio streams to builder instance  |
+| [`du`](buildx_du.md)                 | Disk usage                                       |
+| [`history`](buildx_history.md)       | Commands to work on build records                |
+| [`imagetools`](buildx_imagetools.md) | Commands to work on images in registry           |
+| [`inspect`](buildx_inspect.md)       | Inspect current builder instance                 |
+| [`ls`](buildx_ls.md)                 | List builder instances                           |
+| [`policy`](buildx_policy.md)         | Commands for working with build policies         |
+| [`prune`](buildx_prune.md)           | Remove build cache                               |
+| [`rm`](buildx_rm.md)                 | Remove one or more builder instances             |
+| [`stop`](buildx_stop.md)             | Stop builder instance                            |
+| [`use`](buildx_use.md)               | Set the current builder instance                 |
+| [`version`](buildx_version.md)       | Show buildx version information                  |
 
 
 ### Options
@@ -44,3 +45,11 @@ Extended build capabilities with BuildKit
 ### <a name="builder"></a> Override the configured builder instance (--builder)
 
 You can also use the `BUILDX_BUILDER` environment variable.
+
+### Enable the default policy
+
+Set `BUILDX_DEFAULT_POLICY=1` to enable Buildx's built-in source policy. The
+policy verifies signed tags for images managed by Docker, including BuildKit
+builder images and Dockerfile frontends. Untagged digest references and images
+outside the managed repositories are allowed unchanged. Tagged references
+that also contain a digest still have their release identity verified.

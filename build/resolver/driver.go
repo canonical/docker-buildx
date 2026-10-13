@@ -1,0 +1,376 @@
+package resolver
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strconv"
+	"sync"
+
+	"github.com/containerd/platforms"
+	"github.com/docker/buildx/builder"
+	"github.com/docker/buildx/driver"
+	"github.com/docker/buildx/util/progress"
+	"github.com/moby/buildkit/client"
+	gateway "github.com/moby/buildkit/frontend/gateway/client"
+	"github.com/moby/buildkit/util/flightcontrol"
+	"github.com/moby/buildkit/util/tracing"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
+)
+
+func Resolve(ctx context.Context, nodes []builder.Node, platforms []ocispecs.Platform, pw progress.Writer) ([]*ResolvedNode, error) {
+	result, err := ResolveAll(ctx, nodes, map[string][]ocispecs.Platform{"default": platforms}, pw)
+	if err != nil {
+		return nil, err
+	}
+	return result["default"], nil
+}
+
+func ResolveAll(ctx context.Context, nodes []builder.Node, optPlatforms map[string][]ocispecs.Platform, pw progress.Writer) (map[string][]*ResolvedNode, error) {
+	driverRes := newDriverResolver(nodes)
+	drivers, err := driverRes.Resolve(ctx, optPlatforms, pw)
+	if err != nil {
+		return nil, err
+	}
+	return drivers, err
+}
+
+type ResolvedNode struct {
+	resolver    *nodeResolver
+	driverIndex int
+	platforms   []ocispecs.Platform
+}
+
+func (dp ResolvedNode) Key() string {
+	return strconv.Itoa(dp.driverIndex)
+}
+
+func (dp ResolvedNode) Node() builder.Node {
+	return dp.resolver.nodes[dp.driverIndex]
+}
+
+func (dp ResolvedNode) Platforms() []ocispecs.Platform {
+	return dp.platforms
+}
+
+func (dp ResolvedNode) Client(ctx context.Context) (*client.Client, error) {
+	node := dp.resolver.nodes[dp.driverIndex]
+	// loadbalance=random requires a fresh connection per call so each target lands on a different pod.
+	if node.Driver != nil && node.Driver.RequiresUncachedClient() {
+		if _, err := dp.resolver.boot(ctx, []int{dp.driverIndex}, nil); err != nil {
+			return nil, err
+		}
+		return node.Driver.UncachedClient(ctx)
+	}
+	clients, err := dp.resolver.boot(ctx, []int{dp.driverIndex}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return clients[0], nil
+}
+
+func (dp ResolvedNode) BuildOpts(ctx context.Context) (gateway.BuildOpts, error) {
+	opts, err := dp.resolver.opts(ctx, []int{dp.driverIndex}, nil)
+	if err != nil {
+		return gateway.BuildOpts{}, err
+	}
+	return opts[0], nil
+}
+
+type matchMaker func(ocispecs.Platform) platforms.MatchComparer
+
+type cachedGroup[T any] struct {
+	g       flightcontrol.Group[T]
+	cache   map[int]T
+	cacheMu sync.Mutex
+}
+
+func newCachedGroup[T any]() cachedGroup[T] {
+	return cachedGroup[T]{
+		cache: map[int]T{},
+	}
+}
+
+type nodeResolver struct {
+	nodes     []builder.Node
+	clients   cachedGroup[*client.Client]
+	buildOpts cachedGroup[gateway.BuildOpts]
+}
+
+func newDriverResolver(nodes []builder.Node) *nodeResolver {
+	r := &nodeResolver{
+		nodes:     nodes,
+		clients:   newCachedGroup[*client.Client](),
+		buildOpts: newCachedGroup[gateway.BuildOpts](),
+	}
+	return r
+}
+
+func (r *nodeResolver) Resolve(ctx context.Context, optPlatforms map[string][]ocispecs.Platform, pw progress.Writer) (map[string][]*ResolvedNode, error) {
+	if len(r.nodes) == 0 {
+		return nil, nil
+	}
+
+	nodes := map[string][]*ResolvedNode{}
+	for k, optPlatforms := range optPlatforms {
+		node, perfect, err := r.resolve(ctx, optPlatforms, pw, platforms.OnlyStrict, nil)
+		if err != nil {
+			return nil, err
+		}
+		if !perfect {
+			break
+		}
+		nodes[k] = node
+	}
+	if len(nodes) != len(optPlatforms) {
+		// if we didn't get a perfect match, we need to boot all drivers
+		allIndexes := make([]int, len(r.nodes))
+		for i := range allIndexes {
+			allIndexes[i] = i
+		}
+
+		clients, err := r.boot(ctx, allIndexes, pw)
+		if err != nil {
+			return nil, err
+		}
+		eg, egCtx := errgroup.WithContext(ctx)
+		workers := make([][]ocispecs.Platform, len(clients))
+		for i, c := range clients {
+			if c == nil {
+				continue
+			}
+			eg.Go(func() error {
+				ww, err := c.ListWorkers(egCtx)
+				if err != nil {
+					return errors.Wrap(err, "listing workers")
+				}
+
+				ps := make(map[string]ocispecs.Platform, len(ww))
+				for _, w := range ww {
+					for _, p := range w.Platforms {
+						pk := platforms.Format(platforms.Normalize(p))
+						ps[pk] = p
+					}
+				}
+				for _, p := range ps {
+					workers[i] = append(workers[i], p)
+				}
+				return nil
+			})
+		}
+		if err := eg.Wait(); err != nil {
+			return nil, err
+		}
+
+		// then we can attempt to match against all the available platforms
+		// (this time we don't care about imperfect matches)
+		nodes = map[string][]*ResolvedNode{}
+		for k, optPlatforms := range optPlatforms {
+			node, _, err := r.resolve(ctx, optPlatforms, pw, platforms.Only, func(idx int, n builder.Node) []ocispecs.Platform {
+				return workers[idx]
+			})
+			if err != nil {
+				return nil, err
+			}
+			nodes[k] = node
+		}
+	}
+
+	idxs := make([]int, 0, len(r.nodes))
+	for _, nodes := range nodes {
+		for _, node := range nodes {
+			idxs = append(idxs, node.driverIndex)
+		}
+	}
+
+	// preload capabilities
+	span, ctx := tracing.StartSpan(ctx, "load buildkit capabilities", trace.WithSpanKind(trace.SpanKindInternal))
+	_, err := r.opts(ctx, idxs, pw)
+	tracing.FinishWithError(span, err)
+	if err != nil {
+		return nil, err
+	}
+
+	return nodes, nil
+}
+
+func (r *nodeResolver) resolve(ctx context.Context, ps []ocispecs.Platform, pw progress.Writer, matcher matchMaker, additional func(idx int, n builder.Node) []ocispecs.Platform) ([]*ResolvedNode, bool, error) {
+	if len(r.nodes) == 0 {
+		return nil, true, nil
+	}
+
+	perfect := true
+	nodeIdxs := make([]int, 0)
+	for _, p := range ps {
+		idx := r.get(p, matcher, additional)
+		if idx == -1 {
+			idx = 0
+			perfect = false
+		}
+		nodeIdxs = append(nodeIdxs, idx)
+	}
+
+	var nodes []*ResolvedNode
+	if len(nodeIdxs) == 0 {
+		nodes = append(nodes, &ResolvedNode{
+			resolver:    r,
+			driverIndex: 0,
+		})
+		nodeIdxs = append(nodeIdxs, 0)
+	} else {
+		for i, idx := range nodeIdxs {
+			node := &ResolvedNode{
+				resolver:    r,
+				driverIndex: idx,
+			}
+			if len(ps) > 0 {
+				node.platforms = []ocispecs.Platform{ps[i]}
+			}
+			nodes = append(nodes, node)
+		}
+	}
+
+	nodes = recombineNodes(nodes)
+	if _, err := r.boot(ctx, nodeIdxs, pw); err != nil {
+		return nil, false, err
+	}
+	return nodes, perfect, nil
+}
+
+func (r *nodeResolver) get(p ocispecs.Platform, matcher matchMaker, additionalPlatforms func(int, builder.Node) []ocispecs.Platform) int {
+	best := -1
+	bestPlatform := ocispecs.Platform{}
+	for i, node := range r.nodes {
+		platforms := node.Platforms
+		if additionalPlatforms != nil {
+			platforms = slices.Clone(platforms)
+			platforms = append(platforms, additionalPlatforms(i, node)...)
+		}
+		for _, p2 := range platforms {
+			m := matcher(p2)
+			if !m.Match(p) {
+				continue
+			}
+
+			if best == -1 {
+				best = i
+				bestPlatform = p2
+				continue
+			}
+			if matcher(p2).Less(p, bestPlatform) {
+				best = i
+				bestPlatform = p2
+			}
+		}
+	}
+	return best
+}
+
+func (r *nodeResolver) boot(ctx context.Context, idxs []int, pw progress.Writer) ([]*client.Client, error) {
+	clients := make([]*client.Client, len(idxs))
+
+	baseCtx := ctx
+	eg, ctx := errgroup.WithContext(ctx)
+
+	for i, idx := range idxs {
+		eg.Go(func() error {
+			c, err := r.clients.g.Do(ctx, fmt.Sprint(idx), func(ctx context.Context) (*client.Client, error) {
+				if r.nodes[idx].Driver == nil {
+					return nil, nil
+				}
+				r.clients.cacheMu.Lock()
+				c, ok := r.clients.cache[idx]
+				r.clients.cacheMu.Unlock()
+				if ok {
+					return c, nil
+				}
+				c, err := driver.Boot(ctx, baseCtx, r.nodes[idx].Driver, pw)
+				if err != nil {
+					return nil, err
+				}
+				r.clients.cacheMu.Lock()
+				r.clients.cache[idx] = c
+				r.clients.cacheMu.Unlock()
+				return c, nil
+			})
+			if err != nil {
+				return err
+			}
+			clients[i] = c
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+
+	return clients, nil
+}
+
+func (r *nodeResolver) opts(ctx context.Context, idxs []int, pw progress.Writer) ([]gateway.BuildOpts, error) {
+	clients, err := r.boot(ctx, idxs, pw)
+	if err != nil {
+		return nil, err
+	}
+
+	bopts := make([]gateway.BuildOpts, len(clients))
+	eg, ctx := errgroup.WithContext(ctx)
+	for i, idxs := range idxs {
+		i, idx := i, idxs
+		c := clients[i]
+		if c == nil {
+			continue
+		}
+		eg.Go(func() error {
+			opt, err := r.buildOpts.g.Do(ctx, fmt.Sprint(idx), func(ctx context.Context) (gateway.BuildOpts, error) {
+				r.buildOpts.cacheMu.Lock()
+				opt, ok := r.buildOpts.cache[idx]
+				r.buildOpts.cacheMu.Unlock()
+				if ok {
+					return opt, nil
+				}
+				_, err := c.Build(ctx, client.SolveOpt{
+					Internal: true,
+				}, "buildx", func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+					opt = c.BuildOpts()
+					return nil, nil
+				}, nil)
+				if err != nil {
+					return gateway.BuildOpts{}, err
+				}
+				r.buildOpts.cacheMu.Lock()
+				r.buildOpts.cache[idx] = opt
+				r.buildOpts.cacheMu.Unlock()
+				return opt, err
+			})
+			if err != nil {
+				return err
+			}
+			bopts[i] = opt
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	return bopts, nil
+}
+
+// recombineDriverPairs recombines resolved nodes that are on the same driver
+// back together into a single node.
+func recombineNodes(nodes []*ResolvedNode) []*ResolvedNode {
+	result := make([]*ResolvedNode, 0, len(nodes))
+	lookup := map[int]int{}
+	for _, node := range nodes {
+		if idx, ok := lookup[node.driverIndex]; ok {
+			result[idx].platforms = append(result[idx].platforms, node.platforms...)
+		} else {
+			lookup[node.driverIndex] = len(result)
+			result = append(result, node)
+		}
+	}
+	return result
+}
