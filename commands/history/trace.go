@@ -56,7 +56,7 @@ func loadTrace(ctx context.Context, ref string, nodes []builder.Node) (string, [
 		// build is complete but no trace yet. try to finalize the trace
 		time.Sleep(1 * time.Second) // give some extra time for last parts of trace to be written
 
-		err := finalizeRecord(ctx, rec.Ref, []builder.Node{*rec.node})
+		err := finalizeRecord(ctx, rec.Ref, *rec.node)
 		if err != nil {
 			return "", nil, err
 		}
@@ -156,7 +156,8 @@ func runTrace(ctx context.Context, dockerCli command.Cli, opts traceOptions) err
 		return nil
 	}
 
-	ln, err := net.Listen("tcp", opts.addr)
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(ctx, "tcp", opts.addr)
 	if err != nil {
 		return err
 	}

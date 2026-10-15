@@ -6,17 +6,15 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/builder"
-	"github.com/docker/buildx/localstate"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/go-units"
 	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/buildkit/frontend/dockerfile/dfgitutil"
 	"github.com/pkg/errors"
@@ -24,90 +22,6 @@ import (
 )
 
 const recordsLimit = 50
-
-func BuildName(fattrs map[string]string, ls *localstate.State) string {
-	if v, ok := fattrs["build-arg:BUILDKIT_BUILD_NAME"]; ok && v != "" {
-		return v
-	}
-
-	var res string
-
-	var target, contextPath, dockerfilePath, vcsSource string
-	if v, ok := fattrs["target"]; ok {
-		target = v
-	}
-	if v, ok := fattrs["context"]; ok {
-		contextPath = filepath.ToSlash(v)
-	} else if v, ok := fattrs["vcs:localdir:context"]; ok && v != "." {
-		contextPath = filepath.ToSlash(v)
-	}
-	if v, ok := fattrs["vcs:source"]; ok {
-		vcsSource = v
-	} else if v, ok := fattrs["input:context"]; ok {
-		if _, ok, _ := dfgitutil.ParseGitRef(v); ok {
-			vcsSource = v
-		}
-	}
-	if v, ok := fattrs["filename"]; ok && v != "Dockerfile" {
-		dockerfilePath = filepath.ToSlash(v)
-	}
-	if v, ok := fattrs["vcs:localdir:dockerfile"]; ok && v != "." {
-		dockerfilePath = filepath.ToSlash(filepath.Join(v, dockerfilePath))
-	}
-
-	var localPath string
-	if ls != nil && !build.IsRemoteURL(ls.LocalPath) {
-		if ls.LocalPath != "" && ls.LocalPath != "-" {
-			localPath = filepath.ToSlash(ls.LocalPath)
-		}
-		if ls.DockerfilePath != "" && ls.DockerfilePath != "-" && ls.DockerfilePath != "Dockerfile" {
-			dockerfilePath = filepath.ToSlash(ls.DockerfilePath)
-		}
-	}
-
-	// remove default dockerfile name
-	const defaultFilename = "/Dockerfile"
-	hasDefaultFileName := strings.HasSuffix(dockerfilePath, defaultFilename) || dockerfilePath == ""
-	dockerfilePath = strings.TrimSuffix(dockerfilePath, defaultFilename)
-
-	// dockerfile is a subpath of context
-	if strings.HasPrefix(dockerfilePath, localPath) && len(dockerfilePath) > len(localPath) {
-		res = dockerfilePath[strings.LastIndex(localPath, "/")+1:]
-	} else {
-		// Otherwise, use basename
-		bpath := localPath
-		if len(dockerfilePath) > 0 {
-			bpath = dockerfilePath
-		}
-		if len(bpath) > 0 {
-			lidx := strings.LastIndex(bpath, "/")
-			res = bpath[lidx+1:]
-			if !hasDefaultFileName {
-				if lidx != -1 {
-					res = filepath.ToSlash(filepath.Join(filepath.Base(bpath[:lidx]), res))
-				} else {
-					res = filepath.ToSlash(filepath.Join(filepath.Base(bpath), res))
-				}
-			}
-		}
-	}
-
-	if len(contextPath) > 0 {
-		res = contextPath
-	}
-	if len(target) > 0 {
-		if len(res) > 0 {
-			res = res + " (" + target + ")"
-		} else {
-			res = target
-		}
-	}
-	if res == "" && vcsSource != "" {
-		u, _ := dfgitutil.FragmentFormat(vcsSource)
-		return u
-	}
-	return res
-}
 
 func trimBeginning(s string, n int) string {
 	if len(s) <= n {
@@ -257,25 +171,19 @@ func queryRecords(ctx context.Context, ref string, nodes []builder.Node, opts *q
 	return out, nil
 }
 
-func finalizeRecord(ctx context.Context, ref string, nodes []builder.Node) error {
-	eg, ctx := errgroup.WithContext(ctx)
-	for _, node := range nodes {
-		eg.Go(func() error {
-			if node.Driver == nil {
-				return nil
-			}
-			c, err := node.Driver.Client(ctx)
-			if err != nil {
-				return err
-			}
-			_, err = c.ControlClient().UpdateBuildHistory(ctx, &controlapi.UpdateBuildHistoryRequest{
-				Ref:      ref,
-				Finalize: true,
-			})
-			return err
-		})
+func finalizeRecord(ctx context.Context, ref string, node builder.Node) error {
+	if node.Driver == nil {
+		return nil
 	}
-	return eg.Wait()
+	c, err := node.Driver.Client(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = c.ControlClient().UpdateBuildHistory(ctx, &controlapi.UpdateBuildHistoryRequest{
+		Ref:      ref,
+		Finalize: true,
+	})
+	return err
 }
 
 func formatDuration(d time.Duration) string {
@@ -283,6 +191,17 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%.1fs", d.Seconds())
 	}
 	return fmt.Sprintf("%dm %2ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// humanizeBytes formats a raw byte-count string (as stored in the frontend
+// attributes) into a human-readable size. Non-numeric values such as "-1"
+// (unlimited swap) are returned unchanged.
+func humanizeBytes(v string) string {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return v
+	}
+	return units.BytesSize(float64(n))
 }
 
 type matchFunc func(*controlapi.BuildHistoryRecord) bool
@@ -425,8 +344,8 @@ func timeBasedFilter(key, value, sep string) (matchFunc, error) {
 
 func cutAny(s string, seps ...string) (before, after, sep string, found bool) {
 	for _, sep := range seps {
-		if idx := strings.Index(s, sep); idx != -1 {
-			return s[:idx], s[idx+len(sep):], sep, true
+		if before0, after0, ok := strings.Cut(s, sep); ok {
+			return before0, after0, sep, true
 		}
 	}
 	return s, "", "", false

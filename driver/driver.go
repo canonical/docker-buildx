@@ -8,7 +8,6 @@ import (
 
 	"github.com/docker/buildx/store"
 	"github.com/docker/buildx/util/progress"
-	clitypes "github.com/docker/cli/cli/config/types"
 	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/buildkit/client"
 	"github.com/pkg/errors"
@@ -58,8 +57,8 @@ type Info struct {
 	DynamicNodes []store.Node
 }
 
-type Auth interface {
-	GetAuthConfig(registryHostname string) (clitypes.AuthConfig, error)
+type UncachedClientDriver interface {
+	RequiresUncachedClient() bool
 }
 
 type Driver interface {

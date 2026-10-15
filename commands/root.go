@@ -3,9 +3,11 @@ package commands
 import (
 	"fmt"
 	"os"
+	"time"
 
 	historycmd "github.com/docker/buildx/commands/history"
 	imagetoolscmd "github.com/docker/buildx/commands/imagetools"
+	policycmd "github.com/docker/buildx/commands/policy"
 	"github.com/docker/buildx/util/cobrautil/completion"
 	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/logutil"
@@ -57,6 +59,7 @@ func NewRootCmd(name string, isPlugin bool, dockerCli *command.DockerCli) *cobra
 				options := cliflags.NewClientOptions()
 				options.InstallFlags(nflags)
 				options.SetDefaultOptions(nflags)
+				options.Debug = opt.debug || debug.IsEnabled()
 				return dockerCli.Initialize(options)
 			}
 			return plugin.PersistentPreRunE(cmd, args)
@@ -88,10 +91,16 @@ func NewRootCmd(name string, isPlugin bool, dockerCli *command.DockerCli) *cobra
 
 	logrus.AddHook(logutil.NewFilter([]logrus.Level{
 		logrus.DebugLevel,
+		logrus.WarnLevel,
 	},
 		"serving grpc connection",
 		"stopping session",
 		"using default config store",
+		// containerd's local content store probes fsverity support by trying to
+		// enable it on a temp file, which fails on filesystems without fsverity
+		// (overlayfs, tmpfs, etc.) and logs a warning. This is expected and not
+		// actionable for oci-layout operations, so keep it out of user output.
+		"failed check for fsverity support",
 	))
 
 	addCommands(cmd, &opt, dockerCli)
@@ -119,14 +128,15 @@ func addCommands(cmd *cobra.Command, opts *rootOptions, dockerCli command.Cli) {
 		installCmd(dockerCli),
 		uninstallCmd(dockerCli),
 		versionCmd(dockerCli),
+		policycmd.RootCmd(cmd, dockerCli, policycmd.RootOptions{Builder: &opts.builder}),
 		pruneCmd(dockerCli, opts),
 		duCmd(dockerCli, opts),
 		imagetoolscmd.RootCmd(cmd, dockerCli, imagetoolscmd.RootOptions{Builder: &opts.builder}),
 		historycmd.RootCmd(cmd, dockerCli, historycmd.RootOptions{Builder: &opts.builder}),
+		dapCmd(dockerCli, opts),
 	)
 	if confutil.IsExperimental() {
 		cmd.AddCommand(debugCmd(dockerCli, opts))
-		cmd.AddCommand(dapCmd(dockerCli, opts))
 	}
 
 	cmd.RegisterFlagCompletionFunc( //nolint:errcheck
@@ -138,4 +148,8 @@ func addCommands(cmd *cobra.Command, opts *rootOptions, dockerCli command.Cli) {
 func rootFlags(options *rootOptions, flags *pflag.FlagSet) {
 	flags.StringVar(&options.builder, "builder", os.Getenv("BUILDX_BUILDER"), "Override the configured builder instance")
 	flags.BoolVarP(&options.debug, "debug", "D", debug.IsEnabled(), "Enable debug logging")
+}
+
+func setBuilderStatusTimeoutFlag(flags *pflag.FlagSet, target *time.Duration) {
+	flags.DurationVar(target, "timeout", 20*time.Second, "Override the default timeout for loading builder status")
 }
