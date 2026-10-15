@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,10 @@ import (
 	"testing"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/continuity/fs/fstest"
 	"github.com/moby/buildkit/util/testutil/integration"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,7 +52,7 @@ func withDir(dir string) cmdOpt {
 }
 
 func buildxCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
-	cmd := exec.Command("buildx")
+	cmd := exec.CommandContext(context.TODO(), "buildx")
 	cmd.Env = os.Environ()
 	for _, opt := range opts {
 		opt(cmd)
@@ -76,19 +79,21 @@ func buildxCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
 }
 
 func composeCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
-	cmd := exec.Command("compose")
+	cmd := exec.CommandContext(context.TODO(), "compose")
 	cmd.Env = os.Environ()
 	for _, opt := range opts {
 		opt(cmd)
 	}
 
-	if builder := sb.Address(); builder != "" {
+	builder := sb.Address()
+	context := sb.DockerAddress()
+	if builder != "" && builder != context {
 		cmd.Env = append(cmd.Env,
 			"BUILDX_CONFIG="+buildxConfig(sb),
 			"BUILDX_BUILDER="+builder,
 		)
 	}
-	if context := sb.DockerAddress(); context != "" {
+	if context != "" {
 		cmd.Env = append(cmd.Env, "DOCKER_CONTEXT="+context)
 	}
 	if v := os.Getenv("GO_TEST_COVERPROFILE"); v != "" {
@@ -100,7 +105,7 @@ func composeCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
 }
 
 func dockerCmd(sb integration.Sandbox, opts ...cmdOpt) *exec.Cmd {
-	cmd := exec.Command("docker")
+	cmd := exec.CommandContext(context.TODO(), "docker")
 	cmd.Env = os.Environ()
 	for _, opt := range opts {
 		opt(cmd)
@@ -136,6 +141,15 @@ func isDockerWorker(sb integration.Sandbox) bool {
 func isDockerContainerWorker(sb integration.Sandbox) bool {
 	name, _, _ := driverName(sb.Name())
 	return name == "docker-container"
+}
+
+func isRemoteWorker(sb integration.Sandbox) bool {
+	name, _, _ := driverName(sb.Name())
+	return name == "remote"
+}
+
+func isRemoteMultiNodeWorker(sb integration.Sandbox) bool {
+	return sb.Name() == "remote+multinode"
 }
 
 func driverName(sbName string) (string, bool, bool) {
@@ -200,10 +214,10 @@ func buildkitVersion(t *testing.T, sb integration.Sandbox) string {
 				os.RemoveAll(destDir)
 			})
 
-			cmd := exec.Command(undockBin, "--cachedir", "/root/.cache/undock", "--include", "/usr/bin/buildkitd", "--rm-dist", buildkitImage, destDir)
+			cmd := exec.CommandContext(context.TODO(), undockBin, "--cachedir", "/root/.cache/undock", "--include", "/usr/bin/buildkitd", "--rm-dist", buildkitImage, destDir)
 			require.NoErrorf(t, cmd.Run(), "failed to extract buildkitd binary from %q", buildkitImage)
 
-			cmd = exec.Command(filepath.Join(destDir, "usr", "bin", "buildkitd"), "--version")
+			cmd = exec.CommandContext(context.TODO(), filepath.Join(destDir, "usr", "bin", "buildkitd"), "--version")
 			out, err := cmd.CombinedOutput()
 			require.NoErrorf(t, err, "failed to get BuildKit version from %q: %s", buildkitImage, string(out))
 
@@ -236,6 +250,20 @@ func skipNoCompatBuildKit(t *testing.T, sb integration.Sandbox, constraint strin
 	if !matchesBuildKitVersion(t, sb, constraint) {
 		t.Skipf("buildkit version %s does not match %s constraint (%s)", buildkitVersion(t, sb), constraint, msg)
 	}
+}
+
+func defaultManifestMediaType(t *testing.T, sb integration.Sandbox) string {
+	if matchesBuildKitVersion(t, sb, ">= 0.31.0-0") {
+		return ocispecs.MediaTypeImageManifest
+	}
+	return images.MediaTypeDockerSchema2Manifest
+}
+
+func defaultIndexMediaType(t *testing.T, sb integration.Sandbox) string {
+	if matchesBuildKitVersion(t, sb, ">= 0.31.0-0") {
+		return ocispecs.MediaTypeImageIndex
+	}
+	return images.MediaTypeDockerSchema2ManifestList
 }
 
 func ptrstr(s any) *string {

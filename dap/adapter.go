@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -67,10 +67,10 @@ func New[C LaunchConfig]() *Adapter[C] {
 	return d
 }
 
-func (d *Adapter[C]) Start(ctx context.Context, conn Conn) (C, error) {
-	d.eg, _ = errgroup.WithContext(ctx)
+func (d *Adapter[C]) Start(conn Conn) (C, error) {
+	d.eg, _ = errgroup.WithContext(context.Background())
 	d.eg.Go(func() error {
-		return d.srv.Serve(ctx, conn)
+		return d.srv.Serve(conn)
 	})
 
 	<-d.initialized
@@ -83,7 +83,7 @@ func (d *Adapter[C]) Start(ctx context.Context, conn Conn) (C, error) {
 	return resp.Config, resp.Error
 }
 
-func (d *Adapter[C]) Stop() error {
+func (d *Adapter[C]) Stop(retErr error) error {
 	if d.eg == nil {
 		return nil
 	}
@@ -94,15 +94,27 @@ func (d *Adapter[C]) Stop() error {
 				Event: "terminated",
 			},
 		}
-		// TODO: detect exit code from threads
-		// c.C() <- &dap.ExitedEvent{
-		// 	Event: dap.Event{
-		// 		Event: "exited",
-		// 	},
-		// 	Body: dap.ExitedEventBody{
-		// 		ExitCode: exitCode,
-		// 	},
-		// }
+
+		// Send an exit code based on the returned error.
+		// Any error results in sending an exit code of 1 while
+		// no error sends zero for success.
+		//
+		// The exited event is sent after the terminated event.
+		// See the specification overview diagram on the bottom of the page
+		// for a detailed flowchart.
+		// https://microsoft.github.io/debug-adapter-protocol/overview
+		exitCode := 0
+		if retErr != nil {
+			exitCode = 1
+		}
+		c.C() <- &dap.ExitedEvent{
+			Event: dap.Event{
+				Event: "exited",
+			},
+			Body: dap.ExitedEventBody{
+				ExitCode: exitCode,
+			},
+		}
 	})
 	d.srv.Stop()
 
@@ -568,11 +580,14 @@ func newBreakpointMap() *breakpointMap {
 func (b *breakpointMap) Set(fname string, sbps []dap.SourceBreakpoint) (breakpoints []dap.Breakpoint) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// explicitly initialize breakpoints so that
-	// we do not send a null back in the JSON if there are no breakpoints
+
+	// Explicitly initialize breakpoints so that we do not send a
+	// null back in the JSON if there are no breakpoints
 	breakpoints = []dap.Breakpoint{}
 
-	prev := b.byPath[fname]
+	// Use lowercase paths to normalize the case. We can only know the correct casing after
+	// we intersect the breakpoint map. When we report the pending breakpoint to the editor,
+	prev := b.getByPath(fname)
 	for _, sbp := range sbps {
 		index := slices.IndexFunc(prev, func(e dap.Breakpoint) bool {
 			return sbp.Line >= e.Line && sbp.Line <= e.EndLine && sbp.Column >= e.Column && sbp.Column <= e.EndColumn
@@ -588,31 +603,66 @@ func (b *breakpointMap) Set(fname string, sbps []dap.SourceBreakpoint) (breakpoi
 				EndLine:   sbp.Line,
 				Column:    sbp.Column,
 				EndColumn: sbp.Column,
+				Source: &dap.Source{
+					Name: path.Base(fname),
+					Path: fname,
+				},
+				Reason: "pending",
 			}
 		}
 		breakpoints = append(breakpoints, bp)
 	}
-	b.byPath[fname] = breakpoints
+	b.setByPath(fname, breakpoints)
 	return breakpoints
 }
 
-func (b *breakpointMap) Intersect(ctx Context, src *pb.Source, ws string) map[digest.Digest]int {
+func (b *breakpointMap) Intersect(ctx Context, src *pb.Source) map[digest.Digest]int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	digests := make(map[digest.Digest]int)
 
 	for dgst, locs := range src.Locations {
-		if id := b.intersect(ctx, src, locs, ws); id > 0 {
+		if id := b.intersect(ctx, src, locs); id > 0 {
 			digests[digest.Digest(dgst)] = id
+		}
+	}
+
+	// Mark unverified breakpoints as failed at this point since we couldn't find an area
+	// in the source where they applied.
+	for _, info := range src.Infos {
+		fname := info.Filename
+
+		bps := b.getByPath(fname)
+		for _, bp := range bps {
+			if !bp.Verified && bp.Reason != "failed" {
+				bp.Reason = "failed"
+
+				ctx.C() <- &dap.BreakpointEvent{
+					Event: dap.Event{Event: "breakpoint"},
+					Body: dap.BreakpointEventBody{
+						Reason:     "changed",
+						Breakpoint: bp,
+					},
+				}
+			}
 		}
 	}
 	return digests
 }
 
-func (b *breakpointMap) intersect(ctx Context, src *pb.Source, locs *pb.Locations, ws string) int {
+func (b *breakpointMap) intersect(ctx Context, src *pb.Source, locs *pb.Locations) int {
 	overlaps := func(r *pb.Range, bp *dap.Breakpoint) bool {
-		return r.Start.Line <= int32(bp.Line) && r.Start.Character <= int32(bp.Column) && r.End.Line >= int32(bp.EndLine) && r.End.Character >= int32(bp.EndColumn)
+		if bp.Line < int(r.Start.Line) || bp.Line > int(r.End.Line) {
+			return false
+		}
+		if bp.Line == int(r.Start.Line) && bp.Column < int(r.Start.Character) {
+			return false
+		}
+		if bp.Line == int(r.End.Line) && bp.Column > int(r.End.Character) {
+			return false
+		}
+		return true
 	}
 
 	for _, loc := range locs.Locations {
@@ -622,9 +672,9 @@ func (b *breakpointMap) intersect(ctx Context, src *pb.Source, locs *pb.Location
 		r := loc.Ranges[0]
 
 		info := src.Infos[loc.SourceIndex]
-		fname := filepath.Join(ws, info.Filename)
+		fname := info.Filename
 
-		bps := b.byPath[fname]
+		bps := b.getByPath(fname)
 		if len(bps) == 0 {
 			// No breakpoints for this file.
 			continue
@@ -641,6 +691,14 @@ func (b *breakpointMap) intersect(ctx Context, src *pb.Source, locs *pb.Location
 				bp.Column = int(r.Start.Character)
 				bp.EndColumn = int(r.End.Character)
 				bp.Verified = true
+				bp.Reason = ""
+
+				// The path from the source might be different than the path
+				// the editor sent to us just because of different casing.
+				// Prefer the version given to us from buildkit and tell
+				// the editor what the proper casing for this should be.
+				bp.Source.Name = path.Base(fname)
+				bp.Source.Path = fname
 
 				ctx.C() <- &dap.BreakpointEvent{
 					Event: dap.Event{Event: "breakpoint"},
@@ -655,4 +713,12 @@ func (b *breakpointMap) intersect(ctx Context, src *pb.Source, locs *pb.Location
 		}
 	}
 	return 0
+}
+
+func (b *breakpointMap) setByPath(fname string, bps []dap.Breakpoint) {
+	b.byPath[strings.ToLower(fname)] = bps
+}
+
+func (b *breakpointMap) getByPath(fname string) []dap.Breakpoint {
+	return b.byPath[strings.ToLower(fname)]
 }

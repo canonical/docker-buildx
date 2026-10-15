@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/buildx/driver/kubernetes/kubeclient"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 )
@@ -29,11 +29,17 @@ func ExecConn(ctx context.Context, restClient rest.Interface, restConfig *rest.C
 			Stdout:    true,
 			Stderr:    true,
 			TTY:       false,
-		}, scheme.ParameterCodec)
+		}, kubeclient.ParameterCodec())
 	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
 	if err != nil {
 		return nil, err
 	}
+	return newExecConn(ctx, exec), nil
+}
+
+// newExecConn wires a remotecommand.Executor's stdin/stdout streams up as a net.Conn.
+// It is split from ExecConn to ease testing.
+func newExecConn(ctx context.Context, exec remotecommand.Executor) net.Conn {
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
 	kc := &kubeConn{
@@ -52,8 +58,11 @@ func ExecConn(ctx context.Context, restClient rest.Interface, restConfig *rest.C
 		if serr != nil && serr != context.Canceled {
 			logrus.Error(serr)
 		}
+		// Ensure the pipes are closed to unblock Read/Write on kubeConn and avoid infinite hangs.
+		stdoutW.CloseWithError(serr)
+		stdinR.CloseWithError(serr)
 	}()
-	return kc, nil
+	return kc
 }
 
 type kubeConn struct {
