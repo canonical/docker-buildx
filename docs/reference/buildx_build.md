@@ -13,43 +13,45 @@ Start a build
 
 ### Options
 
-| Name                                    | Type          | Default   | Description                                                                                                           |
-|:----------------------------------------|:--------------|:----------|:----------------------------------------------------------------------------------------------------------------------|
-| [`--add-host`](#add-host)               | `stringSlice` |           | Add a custom host-to-IP mapping (format: `host:ip`)                                                                   |
-| [`--allow`](#allow)                     | `stringArray` |           | Allow extra privileged entitlement (e.g., `network.host`, `security.insecure`, `device`)                              |
-| [`--annotation`](#annotation)           | `stringArray` |           | Add annotation to the image                                                                                           |
-| [`--attest`](#attest)                   | `stringArray` |           | Attestation parameters (format: `type=sbom,generator=image`)                                                          |
-| [`--build-arg`](#build-arg)             | `stringArray` |           | Set build-time variables                                                                                              |
-| [`--build-context`](#build-context)     | `stringArray` |           | Additional build contexts (e.g., name=path)                                                                           |
-| [`--builder`](#builder)                 | `string`      |           | Override the configured builder instance                                                                              |
-| [`--cache-from`](#cache-from)           | `stringArray` |           | External cache sources (e.g., `user/app:cache`, `type=local,src=path/to/dir`)                                         |
-| [`--cache-to`](#cache-to)               | `stringArray` |           | Cache export destinations (e.g., `user/app:cache`, `type=local,dest=path/to/dir`)                                     |
-| [`--call`](#call)                       | `string`      | `build`   | Set method for evaluating build (`check`, `outline`, `targets`)                                                       |
-| [`--cgroup-parent`](#cgroup-parent)     | `string`      |           | Set the parent cgroup for the `RUN` instructions during build                                                         |
-| [`--check`](#check)                     | `bool`        |           | Shorthand for `--call=check`                                                                                          |
-| `-D`, `--debug`                         | `bool`        |           | Enable debug logging                                                                                                  |
-| [`-f`](#file), [`--file`](#file)        | `string`      |           | Name of the Dockerfile (default: `PATH/Dockerfile`)                                                                   |
-| `--iidfile`                             | `string`      |           | Write the image ID to a file                                                                                          |
-| `--label`                               | `stringArray` |           | Set metadata for an image                                                                                             |
-| [`--load`](#load)                       | `bool`        |           | Shorthand for `--output=type=docker`                                                                                  |
-| [`--metadata-file`](#metadata-file)     | `string`      |           | Write build result metadata to a file                                                                                 |
-| [`--network`](#network)                 | `string`      | `default` | Set the networking mode for the `RUN` instructions during build                                                       |
-| `--no-cache`                            | `bool`        |           | Do not use cache when building the image                                                                              |
-| [`--no-cache-filter`](#no-cache-filter) | `stringArray` |           | Do not cache specified stages                                                                                         |
-| [`-o`](#output), [`--output`](#output)  | `stringArray` |           | Output destination (format: `type=local,dest=path`)                                                                   |
-| [`--platform`](#platform)               | `stringArray` |           | Set target platform for build                                                                                         |
-| [`--progress`](#progress)               | `string`      | `auto`    | Set type of progress output (`auto`, `none`,  `plain`, `quiet`, `rawjson`, `tty`). Use plain to show container output |
-| [`--provenance`](#provenance)           | `string`      |           | Shorthand for `--attest=type=provenance`                                                                              |
-| `--pull`                                | `bool`        |           | Always attempt to pull all referenced images                                                                          |
-| [`--push`](#push)                       | `bool`        |           | Shorthand for `--output=type=registry`                                                                                |
-| `-q`, `--quiet`                         | `bool`        |           | Suppress the build output and print image ID on success                                                               |
-| [`--sbom`](#sbom)                       | `string`      |           | Shorthand for `--attest=type=sbom`                                                                                    |
-| [`--secret`](#secret)                   | `stringArray` |           | Secret to expose to the build (format: `id=mysecret[,src=/local/secret]`)                                             |
-| [`--shm-size`](#shm-size)               | `bytes`       | `0`       | Shared memory size for build containers                                                                               |
-| [`--ssh`](#ssh)                         | `stringArray` |           | SSH agent socket or keys to expose to the build (format: `default\|<id>[=<socket>\|<key>[,<key>]]`)                   |
-| [`-t`](#tag), [`--tag`](#tag)           | `stringArray` |           | Image identifier (format: `[registry/]repository[:tag]`)                                                              |
-| [`--target`](#target)                   | `string`      |           | Set the target build stage to build                                                                                   |
-| [`--ulimit`](#ulimit)                   | `ulimit`      |           | Ulimit options                                                                                                        |
+| Name                                    | Type          | Default   | Description                                                                                                                                      |
+|:----------------------------------------|:--------------|:----------|:-------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`--add-host`](#add-host)               | `stringSlice` |           | Add a custom host-to-IP mapping (format: `host:ip`)                                                                                              |
+| [`--allow`](#allow)                     | `stringArray` |           | Allow extra privileged entitlement (e.g., `network.host`, `security.insecure`, `device`, `buildx.local.delete`)                                  |
+| [`--annotation`](#annotation)           | `stringArray` |           | Add annotation to the image                                                                                                                      |
+| [`--attest`](#attest)                   | `stringArray` |           | Attestation parameters (format: `type=sbom,generator=image`)                                                                                     |
+| [`--build-arg`](#build-arg)             | `stringArray` |           | Set build-time variables                                                                                                                         |
+| [`--build-context`](#build-context)     | `stringArray` |           | Additional build contexts (e.g., name=path)                                                                                                      |
+| [`--builder`](#builder)                 | `string`      |           | Override the configured builder instance                                                                                                         |
+| [`--cache-from`](#cache-from)           | `stringArray` |           | External cache sources (e.g., `user/app:cache`, `type=local,src=path/to/dir`)                                                                    |
+| [`--cache-to`](#cache-to)               | `stringArray` |           | Cache export destinations (e.g., `user/app:cache`, `type=local,dest=path/to/dir`)                                                                |
+| [`--call`](#call)                       | `string`      | `build`   | Set method for evaluating build (`check`, `outline`, `targets`)                                                                                  |
+| [`--cgroup-parent`](#cgroup-parent)     | `string`      |           | Set the parent cgroup for the `RUN` instructions during build                                                                                    |
+| [`--check`](#check)                     | `bool`        |           | Shorthand for `--call=check`                                                                                                                     |
+| `-D`, `--debug`                         | `bool`        |           | Enable debug logging                                                                                                                             |
+| [`-f`](#file), [`--file`](#file)        | `string`      |           | Name of the Dockerfile (default: `PATH/Dockerfile`)                                                                                              |
+| `--iidfile`                             | `string`      |           | Write the image ID to a file                                                                                                                     |
+| `--label`                               | `stringArray` |           | Set metadata for an image                                                                                                                        |
+| [`--load`](#load)                       | `bool`        |           | Shorthand for `--output=type=docker`                                                                                                             |
+| [`--metadata-file`](#metadata-file)     | `string`      |           | Write build result metadata to a file                                                                                                            |
+| [`--network`](#network)                 | `string`      | `default` | Set the networking mode for the `RUN` instructions during build                                                                                  |
+| `--no-cache`                            | `bool`        |           | Do not use cache when building the image                                                                                                         |
+| [`--no-cache-filter`](#no-cache-filter) | `stringArray` |           | Do not cache specified stages                                                                                                                    |
+| [`-o`](#output), [`--output`](#output)  | `stringArray` |           | Output destination (format: `type=local,dest=path`)                                                                                              |
+| [`--platform`](#platform)               | `stringArray` |           | Set target platform for build                                                                                                                    |
+| `--policy`                              | `stringArray` |           | Policy configuration (format: `filename=path[,filename=path][,reset=true\|false][,disabled=true\|false][,strict=true\|false][,log-level=level]`) |
+| [`--progress`](#progress)               | `string`      | `auto`    | Set type of progress output (`auto`, `none`,  `plain`, `quiet`, `rawjson`, `tty`). Use plain to show container output                            |
+| [`--provenance`](#provenance)           | `string`      |           | Shorthand for `--attest=type=provenance`                                                                                                         |
+| `--pull`                                | `bool`        |           | Always attempt to pull all referenced images                                                                                                     |
+| [`--push`](#push)                       | `bool`        |           | Shorthand for `--output=type=registry,unpack=false`                                                                                              |
+| `-q`, `--quiet`                         | `bool`        |           | Suppress the build output and print image ID on success                                                                                          |
+| [`--resource`](#resource)               | `stringArray` |           | Resource limits for build containers (format: `memory=2g`, `cpu-quota=50000`)                                                                    |
+| [`--sbom`](#sbom)                       | `string`      |           | Shorthand for `--attest=type=sbom`                                                                                                               |
+| [`--secret`](#secret)                   | `stringArray` |           | Secret to expose to the build (format: `id=mysecret[,src=/local/secret]`)                                                                        |
+| [`--shm-size`](#shm-size)               | `bytes`       | `0`       | Shared memory size for build containers                                                                                                          |
+| [`--ssh`](#ssh)                         | `stringArray` |           | SSH agent socket or keys to expose to the build (format: `default\|<id>[=<socket>\|<key>[,<key>]]`)                                              |
+| [`-t`](#tag), [`--tag`](#tag)           | `stringArray` |           | Image identifier (format: `[registry/]repository[:tag]`)                                                                                         |
+| [`--target`](#target)                   | `string`      |           | Set the target build stage to build                                                                                                              |
+| [`--ulimit`](#ulimit)                   | `ulimit`      |           | Ulimit options                                                                                                                                   |
 
 
 <!---MARKER_GEN_END-->
@@ -177,9 +179,14 @@ Allow extra privileged entitlement. List of entitlements:
    - `--allow device` - Grants access to all devices.
    - `--allow device=kind|name` - Grants access to a specific device.
    - `--allow device=kind|name,alias=kind|name` - Grants access to a specific device, with optional aliasing.
+- `buildx.local.delete` - Allows local outputs using `mode=delete` to delete
+  stale destination files when the destination is the current working directory
+  or outside it.
 
-For entitlements to be enabled, the BuildKit daemon also needs to allow them
-with `--allow-insecure-entitlement` (see [`create --buildkitd-flags`](buildx_create.md#buildkitd-flags)).
+For BuildKit entitlements to be enabled, the BuildKit daemon also needs to allow
+them with `--allow-insecure-entitlement` (see [`create --buildkitd-flags`](buildx_create.md#buildkitd-flags)).
+The `buildx.local.delete` entitlement is checked by Buildx and isn't sent to the
+BuildKit daemon.
 
 ```console
 $ docker buildx create --use --name insecure-builder --buildkitd-flags '--allow-insecure-entitlement security.insecure'
@@ -241,8 +248,13 @@ Learn more about the built-in build arguments in the [Dockerfile reference docs]
 --build-context=name=VALUE
 ```
 
-Define additional build context with specified contents. In Dockerfile the context can be accessed when `FROM name` or `--from=name` is used.
-When Dockerfile defines a stage with the same name it is overwritten.
+Define additional build context with specified contents.
+
+In a Dockerfile:
+
+- the context can be accessed when `FROM name` or `--from=name` is used
+- the context overrides a stage called `name` when used as `FROM ... AS name`
+- the context overrides a `#syntax` directive when used as `#syntax=name`
 
 The value can be a:
 
@@ -547,13 +559,37 @@ the daemon runs the containers used in the build with the
 ### <a name="file"></a> Specify a Dockerfile (-f, --file)
 
 ```console
-$ docker buildx build -f <filepath> .
+$ docker buildx build -f [PATH|URL|-] .
 ```
 
-Specifies the filepath of the Dockerfile to use.
+Specifies the location of the Dockerfile to use.
 If unspecified, a file named `Dockerfile` at the root of the build context is used by default.
 
-To read a Dockerfile from stdin, you can use `-` as the argument for `--file`.
+The supported inputs formats are:
+
+- [`Local file path`](#local-file-path)
+- [`Remote URL`](#remote-url)
+- [`Standard input`](#standard-input)
+
+#### Local file path
+
+To specify a path to a local Dockerfile:
+
+```console
+$ docker buildx build -f path/to/Dockerfile .
+```
+
+#### Remote URL
+
+To specify a URL to a remote Dockerfile:
+
+```console
+$ docker buildx build -f https://raw.githubusercontent.com/docker/buildx/refs/tags/v0.29.0/Dockerfile .
+```
+
+#### Standard input
+
+To read a Dockerfile from stdin, use `-` as the argument:
 
 ```console
 $ cat Dockerfile | docker buildx build -f - .
@@ -722,6 +758,11 @@ will be put in subdirectories by their platform.
 Attribute key:
 
 - `dest` - destination directory where files will be written
+- `mode` - write mode, either `copy` or `delete`. The default is `copy`.
+  `delete` removes stale files from the destination after exporting the build
+  result. It can be used without `--allow` when `dest` resolves to a
+  subdirectory of the current working directory. If `dest` is the current working
+  directory or resolves outside it, pass `--allow=buildx.local.delete`.
 
 For more information, see
 [Local and tar exporters](https://docs.docker.com/build/exporters/local-tar/).
@@ -1123,6 +1164,43 @@ $ docker buildx build --ulimit nofile=1024:1024 .
 > If you don't provide a `hard limit`, the `soft limit` is used
 > for both values. If no `ulimits` are set, they're inherited from
 > the default `ulimits` set on the daemon.
+
+> [!NOTE]
+> In most cases, it is recommended to let the builder automatically determine
+> the appropriate configurations. Manual adjustments should only be considered
+> when specific performance tuning is required for complex build scenarios.
+
+### <a name="resource"></a> Set CPU and memory limits for build containers (--resource)
+
+The `--resource` flag constrains the resources available to the containers that
+run your `RUN` instructions during the build. It's repeatable and takes
+`key=value` pairs, where `key` is one of:
+
+| Key           | Description                                                                  |
+|:--------------|:-----------------------------------------------------------------------------|
+| `memory`      | Memory limit (format: `<number><unit>`, e.g. `512m`, `2g`).                  |
+| `memory-swap` | Total memory plus swap limit. Set to `-1` to allow unlimited swap.           |
+| `cpu-shares`  | CPU shares (relative weight).                                                |
+| `cpu-period`  | Length of a CPU CFS (Completely Fair Scheduler) period, in microseconds.     |
+| `cpu-quota`   | CPU CFS quota, in microseconds, within each `cpu-period`.                    |
+| `cpuset-cpus` | CPUs in which to allow execution (`0-3`, `0,1`).                             |
+| `cpuset-mems` | Memory nodes (MEMs) in which to allow execution (`0-3`, `0,1`).              |
+
+```console
+$ docker buildx build --resource memory=2g --resource cpu-quota=50000 --resource cpu-period=100000 .
+```
+
+These map to the cgroup resource limits of the legacy `docker build` API and
+only apply to individual build steps. They don't affect the build cache key.
+
+> [!NOTE]
+> These limits require a BuildKit daemon that supports per-step resource limits
+> (the `exec.meta.linux.resources` capability) and only take effect on Linux.
+
+> [!NOTE]
+> Because BuildKit can run build steps in parallel, these limits apply to each
+> step in isolation rather than to the build as a whole. When the same step is
+> requested with different limits, the most relaxed limits are used.
 
 > [!NOTE]
 > In most cases, it is recommended to let the builder automatically determine

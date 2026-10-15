@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/containerd/console"
+	"github.com/containerd/containerd/v2/pkg/epoch"
 	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/store"
@@ -27,6 +28,7 @@ import (
 	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/desktop"
 	"github.com/docker/buildx/util/dockerutil"
+	"github.com/docker/buildx/util/dockerutil/dockerconfig"
 	"github.com/docker/buildx/util/ioset"
 	"github.com/docker/buildx/util/metricutil"
 	"github.com/docker/buildx/util/osutil"
@@ -36,7 +38,6 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	dockeropts "github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types/versions"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/frontend/subrequests"
@@ -49,6 +50,7 @@ import (
 	sourcepolicy "github.com/moby/buildkit/sourcepolicy/pb"
 	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/moby/buildkit/util/progress/progressui"
+	"github.com/moby/moby/client/pkg/versions"
 	"github.com/moby/sys/atomicwriter"
 	"github.com/morikuni/aec"
 	"github.com/pkg/errors"
@@ -78,6 +80,7 @@ type buildOptions struct {
 	noCacheFilter  []string
 	outputs        []string
 	platforms      []string
+	policy         []string
 	callFunc       string
 	secrets        []string
 	shmSize        dockeropts.MemBytes
@@ -85,6 +88,11 @@ type buildOptions struct {
 	tags           []string
 	target         string
 	ulimits        *dockeropts.UlimitOpt
+
+	resources []string
+	// legacyResources is kept separate from resources because the pflag
+	// StringArray for --resource resets its backing slice on first use.
+	legacyResources []string
 
 	attests    []string
 	sbom       string
@@ -130,6 +138,7 @@ func (o *buildOptions) toOptions() (*BuildOptions, error) {
 		Tags:           o.tags,
 		Target:         o.target,
 		Ulimits:        o.ulimits,
+		Resources:      append(o.legacyResources, o.resources...),
 		Builder:        o.builder,
 		NoCache:        o.noCache,
 		Pull:           o.pull,
@@ -137,14 +146,18 @@ func (o *buildOptions) toOptions() (*BuildOptions, error) {
 		ExportLoad:     o.exportLoad,
 	}
 
-	// TODO: extract env var parsing to a method easily usable by library consumers
-	if v := os.Getenv("SOURCE_DATE_EPOCH"); v != "" {
-		if _, ok := opts.BuildArgs["SOURCE_DATE_EPOCH"]; !ok {
-			opts.BuildArgs["SOURCE_DATE_EPOCH"] = v
+	if _, ok := opts.BuildArgs[epoch.SourceDateEpochEnv]; !ok {
+		if v := os.Getenv(epoch.SourceDateEpochEnv); v != "" {
+			opts.BuildArgs[epoch.SourceDateEpochEnv] = v
 		}
 	}
 
 	opts.SourcePolicy, err = build.ReadSourcePolicy()
+	if err != nil {
+		return nil, err
+	}
+
+	opts.Policy, err = buildflags.ParsePolicyConfigs(o.policy)
 	if err != nil {
 		return nil, err
 	}
@@ -227,15 +240,31 @@ func (o *buildOptions) toDisplayMode() (progressui.DisplayMode, error) {
 	return progress, nil
 }
 
+// legacyResourceValue is a pflag.Value that appends a "<key>=value" entry to
+// the --resource list, wiring the hidden legacy flags into the same code path.
+type legacyResourceValue struct {
+	key       string
+	resources *[]string
+}
+
+func (v *legacyResourceValue) String() string { return "" }
+func (v *legacyResourceValue) Type() string   { return "string" }
+func (v *legacyResourceValue) Set(s string) error {
+	*v.resources = append(*v.resources, v.key+"="+s)
+	return nil
+}
+
 const (
 	commandNameAttribute = attribute.Key("command.name")
 	commandOptionsHash   = attribute.Key("command.options.hash")
 	driverNameAttribute  = attribute.Key("driver.name")
 	driverTypeAttribute  = attribute.Key("driver.type")
+	debuggerName         = attribute.Key("debugger.name")
+	debuggerUserAgent    = attribute.Key("debugger.user.agent")
 )
 
-func buildMetricAttributes(dockerCli command.Cli, driverType string, options *buildOptions) attribute.Set {
-	return attribute.NewSet(
+func buildMetricAttributes(dockerCli command.Cli, driverType string, options *buildOptions, debugger debuggerOptions) attribute.Set {
+	kvs := []attribute.KeyValue{
 		commandNameAttribute.String("build"),
 		attribute.Stringer(string(commandOptionsHash), &buildOptionsHash{
 			buildOptions: options,
@@ -243,7 +272,16 @@ func buildMetricAttributes(dockerCli command.Cli, driverType string, options *bu
 		}),
 		driverNameAttribute.String(options.builder),
 		driverTypeAttribute.String(driverType),
-	)
+	}
+
+	if debugger != nil {
+		d := debugger.Info()
+		kvs = append(kvs,
+			debuggerName.String(d.Name),
+			debuggerUserAgent.String(d.UserAgent),
+		)
+	}
+	return attribute.NewSet(kvs...)
 }
 
 // buildOptionsHash computes a hash for the buildOptions when the String method is invoked.
@@ -324,7 +362,7 @@ func runBuild(ctx context.Context, dockerCli command.Cli, debugOpts debuggerOpti
 	}
 	driverType := b.Driver
 
-	attributes := buildMetricAttributes(dockerCli, driverType, &options)
+	attributes := buildMetricAttributes(dockerCli, driverType, &options, debugOpts)
 
 	ctx2, cancel := context.WithCancelCause(context.TODO())
 	defer func() { cancel(errors.WithStack(context.Canceled)) }()
@@ -380,10 +418,6 @@ func runBuild(ctx context.Context, dockerCli command.Cli, debugOpts debuggerOpti
 	done := timeBuildCommand(mp, attributes)
 	resp, inputs, retErr := runBuildWithOptions(ctx, dockerCli, opts, dbg, printer)
 
-	if err := printer.Wait(); retErr == nil {
-		retErr = err
-	}
-
 	done(retErr)
 	if retErr != nil {
 		return retErr
@@ -393,14 +427,14 @@ func runBuild(ctx context.Context, dockerCli command.Cli, debugOpts debuggerOpti
 	case progressui.RawJSONMode:
 		// no additional display
 	case progressui.QuietMode:
-		if options.quiet {
+		if options.quiet && opts.CallFunc == nil {
 			fmt.Println(getImageID(resp.ExporterResponse))
 		}
 	default:
 		desktop.PrintBuildDetails(os.Stderr, printer.BuildRefs(), term)
 	}
 	if options.imageIDFile != "" {
-		if err := os.WriteFile(options.imageIDFile, []byte(getImageID(resp.ExporterResponse)), 0644); err != nil {
+		if err := os.WriteFile(options.imageIDFile, []byte(getImageID(resp.ExporterResponse)), 0o644); err != nil {
 			return errors.Wrap(err, "writing image ID file")
 		}
 	}
@@ -429,7 +463,7 @@ func runBuild(ctx context.Context, dockerCli command.Cli, debugOpts debuggerOpti
 	return nil
 }
 
-// getImageID returns the image ID - the digest of the image config
+// getImageID returns the image identifier selected for the export destination.
 func getImageID(resp map[string]string) string {
 	dgst := resp[exptypes.ExporterImageDigestKey]
 	if v, ok := resp[exptypes.ExporterImageConfigDigestKey]; ok {
@@ -444,11 +478,20 @@ func runBuildWithOptions(ctx context.Context, dockerCli command.Cli, opts *Build
 		if err := dbg.Start(printer, opts); err != nil {
 			return nil, nil, err
 		}
-		defer dbg.Stop()
+		defer func() { dbg.Stop(retErr) }()
 
 		bh = dbg.Handler()
 		dockerCli.SetIn(nil)
 	}
+
+	// Ensure messages sent to the printer are flushed before the debugger completes.
+	// This prevents late messages from not being sent because the connection was
+	// terminated before completion of the debugger.
+	defer func() {
+		if err := printer.Wait(); retErr == nil {
+			retErr = err
+		}
+	}()
 
 	in := dockerCli.In()
 	for {
@@ -511,7 +554,7 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugger debuggerOpt
 
 	flags.StringSliceVar(&options.extraHosts, "add-host", []string{}, `Add a custom host-to-IP mapping (format: "host:ip")`)
 
-	flags.StringArrayVar(&options.allow, "allow", []string{}, `Allow extra privileged entitlement (e.g., "network.host", "security.insecure", "device")`)
+	flags.StringArrayVar(&options.allow, "allow", []string{}, `Allow extra privileged entitlement (e.g., "network.host", "security.insecure", "device", "buildx.local.delete")`)
 
 	flags.StringArrayVarP(&options.annotations, "annotation", "", []string{}, "Add annotation to the image")
 
@@ -541,7 +584,9 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugger debuggerOpt
 
 	flags.StringArrayVar(&options.platforms, "platform", platformsDefault, "Set target platform for build")
 
-	flags.BoolVar(&options.exportPush, "push", false, `Shorthand for "--output=type=registry"`)
+	flags.StringArrayVar(&options.policy, "policy", []string{}, `Policy configuration (format: "filename=path[,filename=path][,reset=true|false][,disabled=true|false][,strict=true|false][,log-level=level]")`)
+
+	flags.BoolVar(&options.exportPush, "push", false, `Shorthand for "--output=type=registry,unpack=false"`)
 
 	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Suppress the build output and print image ID on success")
 
@@ -558,6 +603,8 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugger debuggerOpt
 	options.ulimits = dockeropts.NewUlimitOpt(nil)
 	flags.Var(options.ulimits, "ulimit", "Ulimit options")
 
+	flags.StringArrayVar(&options.resources, "resource", []string{}, `Resource limits for build containers (format: "memory=2g", "cpu-quota=50000")`)
+
 	flags.StringArrayVar(&options.attests, "attest", []string{}, `Attestation parameters (format: "type=sbom,generator=image")`)
 	flags.StringVar(&options.sbom, "sbom", "", `Shorthand for "--attest=type=sbom"`)
 	flags.StringVar(&options.provenance, "provenance", "", `Shorthand for "--attest=type=provenance"`)
@@ -570,11 +617,32 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugger debuggerOpt
 	var ignore string
 	var ignoreSlice []string
 	var ignoreBool bool
-	var ignoreInt int64
 
 	flags.StringVar(&options.callFunc, "print", "", "Print result of information request (e.g., outline, targets)")
 	cobrautil.MarkFlagsExperimental(flags, "print")
 	flags.MarkHidden("print")
+
+	// Legacy per-resource flags, hidden and superseded by --resource.
+	flags.VarP(&legacyResourceValue{key: "memory", resources: &options.legacyResources}, "memory", "m", "Memory limit")
+	flags.MarkHidden("memory")
+
+	flags.VarP(&legacyResourceValue{key: "memory-swap", resources: &options.legacyResources}, "memory-swap", "", `Swap limit equal to memory plus swap: "-1" to enable unlimited swap`)
+	flags.MarkHidden("memory-swap")
+
+	flags.VarP(&legacyResourceValue{key: "cpu-shares", resources: &options.legacyResources}, "cpu-shares", "c", "CPU shares (relative weight)")
+	flags.MarkHidden("cpu-shares")
+
+	flags.VarP(&legacyResourceValue{key: "cpu-period", resources: &options.legacyResources}, "cpu-period", "", "Limit the CPU CFS (Completely Fair Scheduler) period")
+	flags.MarkHidden("cpu-period")
+
+	flags.VarP(&legacyResourceValue{key: "cpu-quota", resources: &options.legacyResources}, "cpu-quota", "", "Limit the CPU CFS (Completely Fair Scheduler) quota")
+	flags.MarkHidden("cpu-quota")
+
+	flags.VarP(&legacyResourceValue{key: "cpuset-cpus", resources: &options.legacyResources}, "cpuset-cpus", "", `CPUs in which to allow execution ("0-3", "0,1")`)
+	flags.MarkHidden("cpuset-cpus")
+
+	flags.VarP(&legacyResourceValue{key: "cpuset-mems", resources: &options.legacyResources}, "cpuset-mems", "", `MEMs in which to allow execution ("0-3", "0,1")`)
+	flags.MarkHidden("cpuset-mems")
 
 	flags.BoolVar(&ignoreBool, "compress", false, "Compress the build context using gzip")
 	flags.MarkHidden("compress")
@@ -591,27 +659,6 @@ func buildCmd(dockerCli command.Cli, rootOpts *rootOptions, debugger debuggerOpt
 	flags.MarkHidden("squash")
 	flags.SetAnnotation("squash", "flag-warn", []string{"experimental flag squash is removed with BuildKit. You should squash inside build using a multi-stage Dockerfile for efficiency."})
 	cobrautil.MarkFlagsExperimental(flags, "squash")
-
-	flags.StringVarP(&ignore, "memory", "m", "", "Memory limit")
-	flags.MarkHidden("memory")
-
-	flags.StringVar(&ignore, "memory-swap", "", `Swap limit equal to memory plus swap: "-1" to enable unlimited swap`)
-	flags.MarkHidden("memory-swap")
-
-	flags.Int64VarP(&ignoreInt, "cpu-shares", "c", 0, "CPU shares (relative weight)")
-	flags.MarkHidden("cpu-shares")
-
-	flags.Int64Var(&ignoreInt, "cpu-period", 0, "Limit the CPU CFS (Completely Fair Scheduler) period")
-	flags.MarkHidden("cpu-period")
-
-	flags.Int64Var(&ignoreInt, "cpu-quota", 0, "Limit the CPU CFS (Completely Fair Scheduler) quota")
-	flags.MarkHidden("cpu-quota")
-
-	flags.StringVar(&ignore, "cpuset-cpus", "", `CPUs in which to allow execution ("0-3", "0,1")`)
-	flags.MarkHidden("cpuset-cpus")
-
-	flags.StringVar(&ignore, "cpuset-mems", "", `MEMs in which to allow execution ("0-3", "0,1")`)
-	flags.MarkHidden("cpuset-mems")
 
 	flags.BoolVar(&ignoreBool, "rm", true, "Remove intermediate containers after a successful build")
 	flags.MarkHidden("rm")
@@ -655,7 +702,7 @@ func writeMetadataFile(filename string, dt any) error {
 	if err != nil {
 		return err
 	}
-	return atomicwriter.WriteFile(filename, b, 0644)
+	return atomicwriter.WriteFile(filename, b, 0o644)
 }
 
 func decodeExporterResponse(exporterResponse map[string]string) map[string]any {
@@ -965,6 +1012,7 @@ type BuildOptions struct {
 	Tags                   []string
 	Target                 string
 	Ulimits                *dockeropts.UlimitOpt
+	Resources              []string
 	Builder                string
 	NoCache                bool
 	Pull                   bool
@@ -975,6 +1023,7 @@ type BuildOptions struct {
 	GroupRef               string
 	Annotations            []string
 	ProvenanceResponseMode string
+	Policy                 []buildflags.PolicyConfig
 }
 
 // RunBuild runs the specified build and returns the result.
@@ -986,6 +1035,11 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 	contexts := map[string]build.NamedContext{}
 	for name, path := range in.NamedContexts {
 		contexts[name] = build.NamedContext{Path: path}
+	}
+
+	resourceLimits, err := build.ParseResourceLimits(in.Resources)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	opts := build.Options{
@@ -1008,6 +1062,7 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 		Tags:                   in.Tags,
 		Target:                 in.Target,
 		Ulimits:                in.Ulimits,
+		ResourceLimits:         resourceLimits,
 		GroupRef:               in.GroupRef,
 		ProvenanceResponseMode: confutil.ParseMetadataProvenance(in.ProvenanceResponseMode),
 	}
@@ -1019,7 +1074,7 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 	opts.Platforms = platforms
 
 	opts.Session = append(opts.Session, authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
-		ConfigFile: dockerCli.ConfigFile(),
+		AuthConfigProvider: dockerconfig.LoadAuthConfig(dockerCli),
 	}))
 
 	secrets, err := build.CreateSecrets(in.Secrets)
@@ -1047,6 +1102,10 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 		for i := range outputs {
 			if outputs[i].Type == client.ExporterImage {
 				outputs[i].Attrs["push"] = "true"
+				// Skip unpacking when only pushing to registry (unless explicitly set)
+				if _, ok := outputs[i].Attrs["unpack"]; !ok {
+					outputs[i].Attrs["unpack"] = "false"
+				}
 				pushUsed = true
 			}
 		}
@@ -1055,6 +1114,8 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 				Type: client.ExporterImage,
 				Attrs: map[string]string{
 					"push": "true",
+					// Skip unpacking when only pushing to registry
+					"unpack": "false",
 				},
 			})
 		}
@@ -1077,6 +1138,14 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 		}
 	}
 
+	allow, allowLocalOutputDelete, err := buildflags.ParseEntitlements(in.Allow)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := build.ValidateLocalExportDelete(outputs, allowLocalOutputDelete); err != nil {
+		return nil, nil, err
+	}
+
 	opts.Annotations, err = buildflags.ParseAnnotations(in.Annotations)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "parse annotations")
@@ -1096,11 +1165,8 @@ func RunBuild(ctx context.Context, dockerCli command.Cli, in *BuildOptions, inSt
 	opts.Attests = in.Attests.ToMap()
 
 	opts.SourcePolicy = in.SourcePolicy
+	opts.Policy = in.Policy
 
-	allow, err := buildflags.ParseEntitlements(in.Allow)
-	if err != nil {
-		return nil, nil, err
-	}
 	opts.Allow = allow
 
 	if in.CallFunc != nil {

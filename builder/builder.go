@@ -24,7 +24,9 @@ import (
 	"github.com/docker/cli/cli/command"
 	dopts "github.com/docker/cli/opts"
 	"github.com/google/shlex"
+	buildkitdconfig "github.com/moby/buildkit/cmd/buildkitd/config"
 	"github.com/moby/buildkit/util/progress/progressui"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 	"github.com/tonistiigi/go-csvvalue"
@@ -247,7 +249,7 @@ func (b *Builder) Factory(ctx context.Context, dialMeta map[string][]string) (_ 
 			}
 			// check if endpoint is healthy is needed to determine the driver type.
 			// if this fails then can't continue with driver selection.
-			if _, err = dockerapi.Ping(ctx); err != nil {
+			if _, err = dockerapi.Ping(ctx, dockerclient.PingOptions{}); err != nil {
 				return
 			}
 			b.driverFactory.Factory, err = driver.GetDefaultFactory(ctx, ep, dockerapi, false, dialMeta)
@@ -344,6 +346,7 @@ type CreateOpts struct {
 	Use                 bool
 	Endpoint            string
 	Append              bool
+	Timeout             time.Duration
 }
 
 func Create(ctx context.Context, txn *store.Txn, dockerCli command.Cli, opts CreateOpts) (*Builder, error) {
@@ -523,8 +526,10 @@ func Create(ctx context.Context, txn *store.Txn, dockerCli command.Cli, opts Cre
 		return nil, err
 	}
 
-	cancelCtx, cancel := context.WithCancelCause(ctx)
-	timeoutCtx, _ := context.WithTimeoutCause(cancelCtx, 20*time.Second, errors.WithStack(context.DeadlineExceeded)) //nolint:govet // no need to manually cancel this context as we already rely on parent
+	timeoutCtx, cancel := context.WithCancelCause(ctx)
+	if opts.Timeout > 0 {
+		timeoutCtx, _ = context.WithTimeoutCause(timeoutCtx, opts.Timeout, errors.WithStack(context.DeadlineExceeded)) //nolint:govet // no need to manually cancel this context as we already rely on parent
+	}
 	defer func() { cancel(errors.WithStack(context.Canceled)) }()
 
 	nodes, err := b.LoadNodes(timeoutCtx, WithData())
@@ -661,15 +666,12 @@ func parseBuildkitdFlags(inp string, driver string, driverOpts map[string]string
 
 	var hasNetworkHostEntitlementInConf bool
 	if buildkitdConfigFile != "" {
-		btoml, err := confutil.LoadConfigTree(buildkitdConfigFile)
+		cfg, err := buildkitdconfig.LoadFile(buildkitdConfigFile)
 		if err != nil {
 			return nil, err
-		} else if btoml != nil {
-			if ies := btoml.GetArray("insecure-entitlements"); ies != nil {
-				if slices.Contains(ies.([]string), "network.host") {
-					hasNetworkHostEntitlementInConf = true
-				}
-			}
+		}
+		if slices.Contains(cfg.Entitlements, "network.host") {
+			hasNetworkHostEntitlementInConf = true
 		}
 	}
 

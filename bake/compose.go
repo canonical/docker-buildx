@@ -3,6 +3,7 @@ package bake
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,11 +21,23 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-func ParseComposeFiles(fs []File) (*Config, error) {
-	envs, err := composeEnv()
+func ParseComposeFiles(fs []File, envOverrides map[string]string, opts ...ParseOpt) (*Config, error) {
+	envs, err := composeEnv(envOverrides)
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := parseComposeFiles(fs, envs)
+	if err != nil {
+		return nil, err
+	}
+	if fileRelativePaths(opts) {
+		setComposeContextBase(cfg, fs)
+		rebaseContextPaths(cfg)
+	}
+	return cfg, nil
+}
+
+func parseComposeFiles(fs []File, envs map[string]string) (*Config, error) {
 	var cfgs []composetypes.ConfigFile
 	for _, f := range fs {
 		cfgs = append(cfgs, composetypes.ConfigFile{
@@ -33,6 +46,25 @@ func ParseComposeFiles(fs []File) (*Config, error) {
 		})
 	}
 	return ParseCompose(cfgs, envs)
+}
+
+func setComposeContextBase(c *Config, files []File) {
+	if len(files) == 0 {
+		return
+	}
+	base, ok := localFileDir(files[0].Name)
+	if !ok {
+		return
+	}
+	for _, t := range c.Targets {
+		t.defaultContextBase = base
+		t.hasDefaultContextBase = true
+		if t.Context != nil {
+			t.contextBase = base
+			t.hasContextBase = true
+		}
+		t.setContextsBase(base)
+	}
 }
 
 func ParseCompose(cfgs []composetypes.ConfigFile, envs map[string]string) (*Config, error) {
@@ -278,8 +310,8 @@ func loadComposeFiles(cfgs []composetypes.ConfigFile, envs map[string]string, op
 	})
 }
 
-func validateComposeFile(dt []byte, fn string) (bool, error) {
-	envs, err := composeEnv()
+func validateComposeFile(dt []byte, fn string, envOverrides map[string]string) (bool, error) {
+	envs, err := composeEnv(envOverrides)
 	if err != nil {
 		return false, err
 	}
@@ -303,14 +335,19 @@ func validateCompose(dt []byte, envs map[string]string) error {
 	return err
 }
 
-func composeEnv() (map[string]string, error) {
-	envs := sliceToMap(os.Environ())
+func composeEnv(envOverrides map[string]string) (map[string]string, error) {
+	var env []string
+	if envLookupAllowed() {
+		env = os.Environ()
+	}
+	envs := sliceToMap(env)
 	if wd, err := os.Getwd(); err == nil {
 		envs, err = loadDotEnv(envs, wd)
 		if err != nil {
 			return nil, err
 		}
 	}
+	maps.Copy(envs, envOverrides)
 	return envs, nil
 }
 

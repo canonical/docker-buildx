@@ -8,8 +8,14 @@ vendor/github.com/moby/spdystream/NOTICE
 vendor/github.com/agext/levenshtein/NOTICE
 vendor/github.com/aws/aws-sdk-go-v2/NOTICE.txt
 vendor/github.com/aws/smithy-go/NOTICE
+vendor/github.com/go-openapi/jsonreference/NOTICE
+vendor/github.com/go-openapi/runtime/NOTICE
+vendor/github.com/go-openapi/jsonpointer/NOTICE
+vendor/github.com/theupdateframework/go-tuf/v2/NOTICE
+vendor/github.com/open-policy-agent/opa/internal/providers/aws/NOTICE.txt
 vendor/gopkg.in/yaml.v3/NOTICE
 vendor/google.golang.org/grpc/NOTICE.txt
+vendor/go.yaml.in/yaml/v4/NOTICE
 vendor/go.yaml.in/yaml/v3/NOTICE
 vendor/go.yaml.in/yaml/v2/NOTICE
 vendor/sigs.k8s.io/randfill/NOTICE

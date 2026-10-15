@@ -43,7 +43,7 @@ The following attributes are overridden by the last occurrence:
 - `target.cache-to`
 - `target.dockerfile-inline`
 - `target.dockerfile`
-- `target.outputs`
+- `target.output`
 - `target.platforms`
 - `target.pull`
 - `target.tags`
@@ -236,8 +236,10 @@ The following table shows the complete list of attributes that you can assign to
 | [`no-cache-filter`](#targetno-cache-filter)     | List    | Disable build cache for specific stages                              |
 | [`no-cache`](#targetno-cache)                   | Boolean | Disable build cache completely                                       |
 | [`output`](#targetoutput)                       | List    | Output destinations                                                  |
+| [`policy`](#targetpolicy)                       | List    | Policies to validate build sources and metadata                      |
 | [`platforms`](#targetplatforms)                 | List    | Target platforms                                                     |
 | [`pull`](#targetpull)                           | Boolean | Always pull images                                                   |
+| [`resources`](#targetresources)                 | Map     | Resource limits for build containers                                 |
 | [`secret`](#targetsecret)                       | List    | Secrets to expose to the build                                       |
 | [`shm-size`](#targetshm-size)                   | List    | Size of `/dev/shm`                                                   |
 | [`ssh`](#targetssh)                             | List    | SSH agent sockets or keys to expose to the build                     |
@@ -414,6 +416,11 @@ target "app" {
 ```
 
 This resolves to the current working directory (`"."`) by default.
+Set `BUILDX_BAKE_FILE_RELATIVE_PATHS=1` to resolve local directory paths in
+`target.context` and `target.contexts` relative to the Bake file that defines
+each path. Compose files use the first Compose file directory as the base, which
+matches Compose project directory semantics. Use `cwd://` for paths that should
+remain relative to the current working directory when this opt-in is enabled.
 
 ```console
 $ docker buildx bake --print -f - <<< 'target "default" {}'
@@ -899,6 +906,25 @@ target "default" {
 }
 ```
 
+> [!NOTE]
+> Local outputs with `mode=delete` require granting `--allow=buildx.local.delete`
+> when invoking `docker buildx bake`.
+
+### `target.policy`
+
+Policies to validate build sources and metadata. Each entry uses the same keys
+as the `--policy` flag for `docker buildx build` (`filename`, `reset`,
+`disabled`, `strict`, `log-level`). Bake also automatically loads
+`Dockerfile.rego` alongside the target Dockerfile when present.
+
+```hcl
+target "default" {
+  policy = [
+    { filename = "extra.rego" },
+  ]
+}
+```
+
 ### `target.platforms`
 
 Set target platforms for the build target.
@@ -922,6 +948,29 @@ target "default" {
   pull = true
 }
 ```
+
+### `target.resources`
+
+Sets cgroup resource limits for the containers that run `RUN` instructions
+during the build. The supported keys are `memory`, `memory-swap`, `cpu-shares`,
+`cpu-period`, `cpu-quota`, `cpuset-cpus`, and `cpuset-mems`. These map to the
+equivalent `docker build` flags and to the
+[`--resource`](https://docs.docker.com/reference/cli/docker/buildx/build/#resource)
+flag for `docker buildx build`.
+
+```hcl
+target "default" {
+  resources = {
+    memory      = "2g"
+    memory-swap = "4g"
+    cpu-quota   = 50000
+  }
+}
+```
+
+> [!NOTE]
+> These limits require a BuildKit daemon that supports per-step resource limits
+> and only take effect on Linux. They don't affect the build cache key.
 
 ### `target.secret`
 
@@ -955,6 +1004,14 @@ RUN --mount=type=secret,id=aws,target=/root/.aws/credentials \
     aws cloudfront create-invalidation ...
 RUN --mount=type=secret,id=KUBECONFIG,env=KUBECONFIG \
     helm upgrade --install
+```
+
+You can override the source for an existing secret without changing the target's
+secret IDs. The secret must already be declared by the target.
+
+```console
+$ docker buildx bake --set default.secret.aws=env=AWS_CREDENTIALS
+$ docker buildx bake --set default.secret.KUBECONFIG=src=/path/to/kubeconfig
 ```
 
 ### `target.shm-size`
@@ -999,6 +1056,12 @@ RUN --mount=type=ssh \
     && ssh-keyscan github.com >> ~/.ssh/known_hosts \
     && git clone git@github.com:user/my-private-repo.git
 ```
+
+> [!NOTE]
+> When overriding `ssh` from the command line with `--set`, use the inline
+> `id=path` string form rather than the object form shown above, for example
+> `docker buildx bake --set "*.ssh=default=$HOME/.ssh/id_ed25519"`. Separate
+> multiple paths with commas. See [`bake --set`][set] for details.
 
 ### `target.tags`
 
@@ -1334,11 +1397,17 @@ to define them.
 
 ### Use environment variable as default
 
-You can set a Bake variable to use the value of an environment variable as a default value:
+If an environment variable exists with the same name as a declared Bake
+variable, Bake uses that environment variable value instead of the declared
+default.
+
+To disable this environment-based variable lookup, set
+`BUILDX_BAKE_DISABLE_VARS_ENV_LOOKUP=1`.
+
 
 ```hcl
 variable "HOME" {
-  default = "$HOME"
+  default = "/root"
 }
 ```
 
@@ -1456,6 +1525,7 @@ target "webapp-dev" {
 [platform]: https://docs.docker.com/reference/cli/docker/buildx/build/#platform
 [run_mount_secret]: https://docs.docker.com/reference/dockerfile/#run---mounttypesecret
 [secret]: https://docs.docker.com/reference/cli/docker/buildx/build/#secret
+[set]: https://docs.docker.com/reference/cli/docker/buildx/bake/#set
 [ssh]: https://docs.docker.com/reference/cli/docker/buildx/build/#ssh
 [tag]: https://docs.docker.com/reference/cli/docker/image/build/#tag
 [target]: https://docs.docker.com/reference/cli/docker/image/build/#target

@@ -1,11 +1,5 @@
 name: docs-release
 
-# Default to 'contents: read', which grants actions to read commits.
-#
-# If any permission is set, any permission not included in the list is
-# implicitly set to "none".
-#
-# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
 permissions:
   contents: read
 
@@ -33,30 +27,33 @@ jobs:
     steps:
       -
         name: Checkout docs repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ secrets.GHPAT_DOCS_DISPATCH }}
           repository: docker/docs
           ref: main
       -
         name: Prepare
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_NAME: ${{ github.event.release.name }}
         run: |
           rm -rf ./data/buildx/*
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "RELEASE_NAME=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+          if [ -n "${INPUT_TAG}" ]; then
+            echo "RELEASE_NAME=${INPUT_TAG}" >> $GITHUB_ENV
           else
-            echo "RELEASE_NAME=${{ github.event.release.name }}" >> $GITHUB_ENV
+            echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_ENV
           fi
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           version: ${{ env.SETUP_BUILDX_VERSION }}
           driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
           buildkitd-flags: --debug
       -
         name: Generate yaml
-        uses: docker/bake-action@v6
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
           source: ${{ github.server_url }}/${{ github.repository }}.git#${{ env.RELEASE_NAME }}
           targets: update-docs
@@ -68,7 +65,7 @@ jobs:
       -
         name: Copy yaml
         run: |
-          cp /tmp/buildx-docs/out/reference/*.yaml ./data/buildx/
+          cp /tmp/buildx-docs/out/reference/*.yaml ./data/cli/buildx/
       -
         name: Update vendor
         run: |
@@ -77,12 +74,13 @@ jobs:
           VENDOR_MODULE: github.com/docker/buildx@${{ env.RELEASE_NAME }}
       -
         name: Create PR on docs repo
-        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e  # v7.0.8
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
           token: ${{ secrets.GHPAT_DOCS_DISPATCH }}
           push-to-fork: docker-tools-robot/docker.github.io
           commit-message: "vendor: github.com/docker/buildx ${{ env.RELEASE_NAME }}"
           signoff: true
+          sign-commits: true
           branch: dispatch/buildx-ref-${{ env.RELEASE_NAME }}
           delete-branch: true
           title: Update buildx reference to ${{ env.RELEASE_NAME }}
